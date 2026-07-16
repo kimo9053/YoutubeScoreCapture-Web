@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#e53935" />
+  <meta name="description" content="유튜브 악보 영역을 캡처해 PDF로 저장합니다." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="악보캡처" />
+  <title>Youtube 악보 캡처</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <header>
+        <h1>Youtube 악보 캡처</h1>
+        <p>유튜브 탭/창을 화면 공유한 뒤, 악보 영역만 지정하세요.</p>
+      </header>
+
+      <div class="actions">
+        <button id="btnShare" type="button" class="primary">1. 화면 공유</button>
+        <button id="btnRegion" type="button" disabled>2. 영역 지정</button>
+        <div class="row">
+          <button id="btnStart" type="button" class="primary" disabled>시작</button>
+          <button id="btnStop" type="button" disabled>중지</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>
+          변화 감지 민감도
+          <strong><span id="sensitivityValue">20</span>%</strong>
+        </label>
+        <input id="sensitivity" type="range" min="5" max="60" step="1" value="20" />
+      </div>
+
+      <div class="field">
+        <label>
+          최소 저장간격
+          <strong><span id="intervalValue">0.3</span>초</strong>
+        </label>
+        <input id="minInterval" type="number" min="0.1" max="5" step="0.1" value="0.3" />
+      </div>
+
+      <div class="field">
+        <label>PDF 배열</label>
+        <div class="segmented" role="group" aria-label="PDF 배열">
+          <label class="seg">
+            <input type="radio" name="pdfColumns" value="1" />
+            <span>1열</span>
+          </label>
+          <label class="seg">
+            <input type="radio" name="pdfColumns" value="2" checked />
+            <span>2열</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="status">
+        <div class="status-row">
+          <span><span id="statusDot" class="dot"></span><span id="statusText">대기</span></span>
+          <span>저장: <strong id="captureCount">0</strong>장</span>
+        </div>
+        <div id="regionText">영역: 미지정</div>
+        <div id="selectedText">선택: 0장</div>
+      </div>
+
+      <div class="actions">
+        <button id="btnPdf" type="button" class="primary" disabled>PDF 만들기</button>
+        <div class="row">
+          <button id="btnDeleteSelected" type="button" class="danger" disabled>선택 삭제</button>
+          <button id="btnClear" type="button" class="danger" disabled>전체 비우기</button>
+        </div>
+        <button id="btnInstall" type="button" hidden>앱으로 설치</button>
+      </div>
+
+      <p id="message" class="msg"></p>
+      <p id="installHint" class="msg">PWA: 홈 화면에 추가하면 앱처럼 사용할 수 있습니다.</p>
+
+      <ol class="help">
+        <li>유튜브에서 악보 영상을 재생합니다.</li>
+        <li><strong>화면 공유</strong> → 유튜브 탭/창 선택 (모바일은 지원이 제한될 수 있음)</li>
+        <li>미리보기에서 <strong>악보만</strong> 드래그</li>
+        <li><strong>시작</strong> 후 영상이 끝나면 PDF 생성</li>
+        <li><strong>갤럭시</strong>: Chrome 메뉴 → 홈 화면에 추가 / 앱 설치</li>
+        <li><strong>아이패드</strong>: Safari 공유 → 홈 화면에 추가</li>
+      </ol>
+    </aside>
+
+    <main class="stage">
+      <div id="previewWrap" class="preview-wrap">
+        <video id="preview" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+        <div id="empty" class="empty">화면 공유를 시작하면 미리보기가 표시됩니다.</div>
+      </div>
+      <div class="thumbs-toolbar">
+        <span class="thumbs-hint">썸네일을 눌러 선택 (여러 장 가능)</span>
+        <div class="row tight">
+          <button id="btnSelectAll" type="button" disabled>전체 선택</button>
+          <button id="btnSelectNone" type="button" disabled>선택 해제</button>
+        </div>
+      </div>
+      <div class="thumbs" id="thumbs"></div>
+    </main>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
