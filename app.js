@@ -35,7 +35,17 @@ const els = {
 let deferredInstallPrompt = null;
 let nextCaptureId = 1;
 
-const supportsDisplayMedia = Boolean(
+function detectPlatform() {
+  const ua = navigator.userAgent || "";
+  const isIOS =
+    /iPad|iPhone|iPod/i.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/i.test(ua);
+  return { isIOS, isAndroid, isMobile: isIOS || isAndroid };
+}
+
+const platform = detectPlatform();
+const hasDisplayMedia = Boolean(
   navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function"
 );
 
@@ -124,6 +134,16 @@ function deleteSelected() {
   renderUi();
 }
 
+function mobileShareMessage() {
+  if (platform.isAndroid) {
+    return "갤럭시·안드로이드 Chrome은 화면 공유(getDisplayMedia)를 지원하지 않습니다. 악보 캡처는 PC Chrome/Edge에서만 가능합니다.";
+  }
+  if (platform.isIOS) {
+    return "아이폰·아이패드 Safari는 화면 공유를 지원하지 않습니다. 악보 캡처는 PC Chrome/Edge에서만 가능합니다.";
+  }
+  return "이 브라우저는 화면 공유를 지원하지 않습니다. PC Chrome/Edge를 사용해 주세요.";
+}
+
 function renderUi() {
   const hasStream = Boolean(state.stream);
   const hasRegion = Boolean(state.region);
@@ -133,7 +153,7 @@ function renderUi() {
   els.btnRegion.disabled = !hasStream || state.running;
   els.btnStart.disabled = !hasStream || !hasRegion || state.running;
   els.btnStop.disabled = !state.running;
-  els.btnShare.disabled = state.running || !supportsDisplayMedia;
+  els.btnShare.disabled = state.running;
   els.btnPdf.disabled = count === 0;
   els.btnClear.disabled = count === 0 || state.running;
   els.btnDeleteSelected.disabled = selected === 0 || state.running;
@@ -235,11 +255,13 @@ function drawOverlay(tempRegion = null) {
 }
 
 async function startShare() {
-  if (!supportsDisplayMedia) {
-    setMessage(
-      "이 기기/브라우저는 화면 공유(getDisplayMedia)를 지원하지 않습니다. PC Chrome/Edge에서 사용해 주세요.",
-      true
-    );
+  if (!window.isSecureContext) {
+    setMessage("화면 공유는 https 또는 localhost에서만 동작합니다.", true);
+    return;
+  }
+
+  if (!hasDisplayMedia) {
+    setMessage(mobileShareMessage(), true);
     return;
   }
 
@@ -250,17 +272,23 @@ async function startShare() {
       state.stream = null;
     }
 
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: 10,
-        displaySurface: "browser"
-      },
-      audio: false,
-      preferCurrentTab: false,
-      selfBrowserSurface: "exclude",
-      surfaceSwitching: "include",
-      systemAudio: "exclude"
-    });
+    const videoConstraints = platform.isMobile
+      ? { frameRate: 10 }
+      : { frameRate: 10, displaySurface: "browser" };
+
+    const displayMediaOptions = {
+      video: videoConstraints,
+      audio: false
+    };
+
+    if (!platform.isMobile) {
+      displayMediaOptions.preferCurrentTab = false;
+      displayMediaOptions.selfBrowserSurface = "exclude";
+      displayMediaOptions.surfaceSwitching = "include";
+      displayMediaOptions.systemAudio = "exclude";
+    }
+
+    const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
 
     state.stream = stream;
     state.region = null;
@@ -517,14 +545,20 @@ els.preview.addEventListener("loadedmetadata", syncOverlaySize);
 
 renderUi();
 
-if (!supportsDisplayMedia) {
-  setMessage(
-    "아이폰/아이패드 Safari는 화면 공유 캡처를 지원하지 않습니다. PC Chrome 또는 Edge에서 사용해 주세요.",
-    true
-  );
+if (!hasDisplayMedia) {
+  const siteUrl = "https://kimo9053.github.io/YoutubeScoreCapture-Web/";
+  setMessage(mobileShareMessage(), true);
   if (els.empty) {
-    els.empty.textContent =
-      "이 기기에서는 화면 공유가 불가합니다. PC Chrome/Edge로 접속해 주세요.";
+    els.empty.innerHTML = platform.isAndroid
+      ? `갤럭시에서는 웹 화면 공유가 지원되지 않습니다.<br><br>PC Chrome/Edge에서 아래 주소로 접속해 주세요.<br><strong>${siteUrl}</strong>`
+      : platform.isIOS
+        ? `아이폰·아이패드에서는 웹 화면 공유가 지원되지 않습니다.<br><br>PC Chrome/Edge에서 아래 주소로 접속해 주세요.<br><strong>${siteUrl}</strong>`
+        : "이 브라우저는 화면 공유를 지원하지 않습니다. PC Chrome/Edge로 접속해 주세요.";
+  }
+  if (els.installHint) {
+    els.installHint.textContent = platform.isMobile
+      ? "모바일에서는 홈 화면 추가만 가능하고, 악보 캡처는 PC 전용입니다."
+      : els.installHint.textContent;
   }
 } else if (!window.isSecureContext) {
   setMessage(
