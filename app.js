@@ -35,6 +35,10 @@ const els = {
 let deferredInstallPrompt = null;
 let nextCaptureId = 1;
 
+const supportsDisplayMedia = Boolean(
+  navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function"
+);
+
 const state = {
   stream: null,
   selecting: false,
@@ -129,7 +133,7 @@ function renderUi() {
   els.btnRegion.disabled = !hasStream || state.running;
   els.btnStart.disabled = !hasStream || !hasRegion || state.running;
   els.btnStop.disabled = !state.running;
-  els.btnShare.disabled = state.running;
+  els.btnShare.disabled = state.running || !supportsDisplayMedia;
   els.btnPdf.disabled = count === 0;
   els.btnClear.disabled = count === 0 || state.running;
   els.btnDeleteSelected.disabled = selected === 0 || state.running;
@@ -231,6 +235,14 @@ function drawOverlay(tempRegion = null) {
 }
 
 async function startShare() {
+  if (!supportsDisplayMedia) {
+    setMessage(
+      "이 기기/브라우저는 화면 공유(getDisplayMedia)를 지원하지 않습니다. PC Chrome/Edge에서 사용해 주세요.",
+      true
+    );
+    return;
+  }
+
   try {
     stopCapture();
     if (state.stream) {
@@ -505,6 +517,22 @@ els.preview.addEventListener("loadedmetadata", syncOverlaySize);
 
 renderUi();
 
+if (!supportsDisplayMedia) {
+  setMessage(
+    "아이폰/아이패드 Safari는 화면 공유 캡처를 지원하지 않습니다. PC Chrome 또는 Edge에서 사용해 주세요.",
+    true
+  );
+  if (els.empty) {
+    els.empty.textContent =
+      "이 기기에서는 화면 공유가 불가합니다. PC Chrome/Edge로 접속해 주세요.";
+  }
+} else if (!window.isSecureContext) {
+  setMessage(
+    "화면 공유·PWA는 localhost(또는 https)에서만 동작합니다. start.bat으로 실행하세요.",
+    true
+  );
+}
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./sw.js").catch((err) => {
@@ -539,10 +567,3 @@ els.btnInstall?.addEventListener("click", async () => {
   deferredInstallPrompt = null;
   els.btnInstall.hidden = true;
 });
-
-if (!window.isSecureContext) {
-  setMessage(
-    "화면 공유·PWA는 localhost(또는 https)에서만 동작합니다. start.bat으로 실행하세요.",
-    true
-  );
-}

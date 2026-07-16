@@ -1,4 +1,4 @@
-const CACHE = "ysc-pwa-v2";
+const CACHE = "ysc-pwa-v3";
 const ASSETS = [
   "./",
   "./index.html",
