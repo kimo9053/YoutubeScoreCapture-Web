@@ -1,4 +1,4 @@
-import { compareImageData, fingerprint, fingerprintsSimilar } from "./diff.js";
+import { compareImageData, fingerprint } from "./diff.js";
 import { buildPdf, downloadBlob } from "./pdf.js";
 
 const $ = (id) => document.getElementById(id);
@@ -56,15 +56,22 @@ const state = {
   running: false,
   timerId: null,
   capturing: false,
-  sensitivity: 0.2,
+  sensitivity: 0.08,
   minIntervalMs: 300,
   pdfColumns: 2,
   lastImageData: null,
   lastFingerprint: null,
   lastSavedAt: 0,
+  prevImageData: null,
+  changeStartedAt: 0,
   captures: [],
   selectedIds: new Set()
 };
+
+/** 프레임이 안정화되었다고 볼 연속 변화율 상한 */
+const SETTLE_RATIO = 0.015;
+/** 페이지 전환 중에도 이 시간이 지나면 강제 저장 */
+const MAX_SETTLE_WAIT_MS = 1200;
 
 const workCanvas = document.createElement("canvas");
 const workCtx = workCanvas.getContext("2d", { willReadFrequently: true });
@@ -382,13 +389,15 @@ function beginRegionSelect() {
   window.addEventListener("keydown", onKey);
 }
 
-function grabCrop() {
+function grabCrop({ withDataUrl = false } = {}) {
   const video = els.preview;
   const region = state.region;
   if (!video.videoWidth || !region) return null;
 
-  workCanvas.width = video.videoWidth;
-  workCanvas.height = video.videoHeight;
+  if (workCanvas.width !== video.videoWidth || workCanvas.height !== video.videoHeight) {
+    workCanvas.width = video.videoWidth;
+    workCanvas.height = video.videoHeight;
+  }
   workCtx.drawImage(video, 0, 0);
 
   const sx = Math.max(0, region.x);
@@ -397,25 +406,60 @@ function grabCrop() {
   const sh = Math.min(region.h, video.videoHeight - sy);
   if (sw < 1 || sh < 1) return null;
 
-  cropCanvas.width = sw;
-  cropCanvas.height = sh;
+  if (cropCanvas.width !== sw || cropCanvas.height !== sh) {
+    cropCanvas.width = sw;
+    cropCanvas.height = sh;
+  }
   cropCtx.drawImage(workCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
   const imageData = cropCtx.getImageData(0, 0, sw, sh);
-  const dataUrl = cropCanvas.toDataURL("image/png");
+  const dataUrl = withDataUrl ? cropCanvas.toDataURL("image/png") : null;
   return { dataUrl, width: sw, height: sh, imageData };
 }
 
+function ensureDataUrl(cropped) {
+  if (cropped.dataUrl) return cropped;
+  // grabCrop 직후 cropCanvas에 동일 프레임이 남아 있음
+  if (cropCanvas.width !== cropped.width || cropCanvas.height !== cropped.height) {
+    cropCanvas.width = cropped.width;
+    cropCanvas.height = cropped.height;
+    cropCtx.putImageData(cropped.imageData, 0, 0);
+  }
+  return {
+    ...cropped,
+    dataUrl: cropCanvas.toDataURL("image/png")
+  };
+}
+
 function addCapture(cropped) {
+  const ready = ensureDataUrl(cropped);
   const item = {
     id: nextCaptureId++,
-    dataUrl: cropped.dataUrl,
-    width: cropped.width,
-    height: cropped.height,
+    dataUrl: ready.dataUrl,
+    width: ready.width,
+    height: ready.height,
     createdAt: Date.now()
   };
   state.captures.push(item);
   renderThumbs();
   renderUi();
+}
+
+function saveCapture(cropped, changeRatio, now) {
+  const fp = fingerprint(cropped.imageData);
+  // 픽셀 변화가 있어도 16x16 fingerprint는 악보끼리 비슷해 보이기 쉬움 → 완전 동일만 중복 처리
+  if (state.lastFingerprint && state.lastFingerprint === fp) {
+    state.changeStartedAt = 0;
+    return false;
+  }
+
+  addCapture(cropped);
+  state.lastImageData = cropped.imageData;
+  state.lastFingerprint = fp;
+  state.prevImageData = cropped.imageData;
+  state.lastSavedAt = now;
+  state.changeStartedAt = 0;
+  setMessage(`저장됨 (변화 ${(changeRatio * 100).toFixed(1)}%)`);
+  return true;
 }
 
 async function tick() {
@@ -430,23 +474,34 @@ async function tick() {
       addCapture(cropped);
       state.lastImageData = cropped.imageData;
       state.lastFingerprint = fingerprint(cropped.imageData);
+      state.prevImageData = cropped.imageData;
       state.lastSavedAt = now;
+      state.changeStartedAt = 0;
       setMessage("첫 프레임 저장");
       return;
     }
 
     const { changeRatio } = compareImageData(state.lastImageData, cropped.imageData);
-    if (changeRatio < state.sensitivity) return;
+    const vsPrev = state.prevImageData
+      ? compareImageData(state.prevImageData, cropped.imageData).changeRatio
+      : 1;
+    state.prevImageData = cropped.imageData;
+
+    // 마지막 저장본과 충분히 다르지 않으면 대기
+    if (changeRatio < state.sensitivity) {
+      state.changeStartedAt = 0;
+      return;
+    }
+
+    if (!state.changeStartedAt) state.changeStartedAt = now;
     if (now - state.lastSavedAt < state.minIntervalMs) return;
 
-    const fp = fingerprint(cropped.imageData);
-    if (fingerprintsSimilar(state.lastFingerprint, fp)) return;
+    // 전환 애니메이션 중이면 안정화될 때까지 기다림 (너무 길면 강제 저장)
+    const waited = now - state.changeStartedAt;
+    const settled = vsPrev <= SETTLE_RATIO;
+    if (!settled && waited < MAX_SETTLE_WAIT_MS) return;
 
-    addCapture(cropped);
-    state.lastImageData = cropped.imageData;
-    state.lastFingerprint = fp;
-    state.lastSavedAt = now;
-    setMessage(`저장됨 (변화 ${(changeRatio * 100).toFixed(1)}%)`);
+    saveCapture(cropped, changeRatio, now);
   } catch (error) {
     setMessage(error.message || String(error), true);
   } finally {
@@ -462,7 +517,9 @@ function startCapture() {
   state.running = true;
   state.lastImageData = null;
   state.lastFingerprint = null;
+  state.prevImageData = null;
   state.lastSavedAt = 0;
+  state.changeStartedAt = 0;
   state.timerId = setInterval(tick, 100);
   tick();
   setMessage("캡처 중…");
@@ -483,6 +540,8 @@ function clearCaptures() {
   state.selectedIds.clear();
   state.lastImageData = null;
   state.lastFingerprint = null;
+  state.prevImageData = null;
+  state.changeStartedAt = 0;
   renderThumbs();
   setMessage("캡처를 비웠습니다.");
   renderUi();
@@ -529,14 +588,10 @@ document.querySelectorAll('input[name="pdfColumns"]').forEach((el) => {
 
 els.sensitivity.addEventListener("input", () => {
   els.sensitivityValue.textContent = els.sensitivity.value;
-});
-els.sensitivity.addEventListener("change", () => {
   state.sensitivity = Number(els.sensitivity.value) / 100;
 });
 els.minInterval.addEventListener("input", () => {
   els.intervalValue.textContent = els.minInterval.value;
-});
-els.minInterval.addEventListener("change", () => {
   state.minIntervalMs = Math.max(100, Number(els.minInterval.value) * 1000);
 });
 
