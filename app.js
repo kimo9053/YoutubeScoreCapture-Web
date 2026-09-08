@@ -1,4 +1,4 @@
-import { compareImageData, fingerprint, fingerprintsSimilar } from "./diff.js";
+import { compareImageData, fingerprint, fingerprintsSimilar, detectPlayhead } from "./diff.js";
 import { buildPdf, downloadBlob } from "./pdf.js";
 
 const $ = (id) => document.getElementById(id);
@@ -8,6 +8,7 @@ const els = {
   btnRegion: $("btnRegion"),
   btnMeasureRegion: $("btnMeasureRegion"),
   btnMeasureMode: $("btnMeasureMode"),
+  btnCursorMode: $("btnCursorMode"),
   btnStart: $("btnStart"),
   btnStop: $("btnStop"),
   btnPdf: $("btnPdf"),
@@ -59,6 +60,7 @@ const state = {
   region: null,
   measureRegion: null,
   measureModeEnabled: false,
+  cursorModeEnabled: false,
   running: false,
   timerId: null,
   capturing: false,
@@ -71,6 +73,9 @@ const state = {
   lastMeasureImageData: null,
   prevMeasureImageData: null,
   measureChangeStartedAt: 0,
+  lastPlayheadX: null,
+  lastPlayheadPresent: false,
+  cursorChangeStartedAt: 0,
   lastSavedAt: 0,
   prevImageData: null,
   changeStartedAt: 0,
@@ -172,11 +177,31 @@ function useMeasureCaptureMode() {
   return state.measureModeEnabled && Boolean(state.measureRegion);
 }
 
+function useCursorCaptureMode() {
+  return state.cursorModeEnabled && Boolean(state.region);
+}
+
+function setCaptureMode(mode) {
+  if (mode === "measure") {
+    state.measureModeEnabled = true;
+    state.cursorModeEnabled = false;
+    return;
+  }
+  if (mode === "cursor") {
+    state.cursorModeEnabled = true;
+    state.measureModeEnabled = false;
+    return;
+  }
+  state.measureModeEnabled = false;
+  state.cursorModeEnabled = false;
+}
+
 function renderUi() {
   const hasStream = Boolean(state.stream);
   const hasRegion = Boolean(state.region);
   const hasMeasureRegion = Boolean(state.measureRegion);
   const measureModeOn = useMeasureCaptureMode();
+  const cursorModeOn = useCursorCaptureMode();
   const count = state.captures.length;
   const selected = state.selectedIds.size;
 
@@ -187,6 +212,11 @@ function renderUi() {
   els.btnMeasureMode.textContent = measureModeOn
     ? "마디 숫자 우선 캡처: 켜짐"
     : "마디 숫자 우선 캡처: 꺼짐";
+  els.btnCursorMode.disabled = !hasRegion || state.running;
+  els.btnCursorMode.classList.toggle("on", cursorModeOn);
+  els.btnCursorMode.textContent = cursorModeOn
+    ? "재생 커서 인식 캡처: 켜짐"
+    : "재생 커서 인식 캡처: 꺼짐";
   els.btnStart.disabled = !hasStream || !hasRegion || state.running;
   els.btnStop.disabled = !state.running;
   els.btnShare.disabled = state.running;
@@ -207,16 +237,20 @@ function renderUi() {
   els.statusText.textContent = state.running
     ? measureModeOn
       ? "캡처 중 (마디 숫자)"
-      : "캡처 중"
+      : cursorModeOn
+        ? "캡처 중 (재생 커서)"
+        : "캡처 중"
     : hasRegion && measureModeOn
       ? "준비됨 (마디 숫자 모드)"
-      : hasRegion && hasMeasureRegion
-        ? "마디 숫자 모드 켜기"
-        : hasRegion
-          ? "마디 숫자 영역 권장"
-          : hasStream
-            ? "악보 영역 지정 필요"
-            : "대기";
+      : hasRegion && cursorModeOn
+        ? "준비됨 (재생 커서 모드)"
+        : hasRegion && hasMeasureRegion
+          ? "캡처 모드 선택"
+          : hasRegion
+            ? "캡처 모드 선택"
+            : hasStream
+              ? "악보 영역 지정 필요"
+              : "대기";
 
   if (hasRegion) {
     els.regionText.textContent = `악보 영역: ${state.region.w}×${state.region.h} px`;
@@ -351,6 +385,7 @@ async function startShare() {
     state.region = null;
     state.measureRegion = null;
     state.measureModeEnabled = false;
+    state.cursorModeEnabled = false;
     els.preview.srcObject = stream;
     await els.preview.play();
 
@@ -361,6 +396,7 @@ async function startShare() {
       state.region = null;
       state.measureRegion = null;
       state.measureModeEnabled = false;
+      state.cursorModeEnabled = false;
       setMessage("화면 공유가 종료되었습니다.");
       renderUi();
       drawOverlay();
@@ -442,6 +478,7 @@ function beginRegionSelect(mode = "main") {
       state.region = current;
       state.measureRegion = null;
       state.measureModeEnabled = false;
+      state.cursorModeEnabled = false;
       cleanup();
       setMessage(`악보 영역 지정됨 (${current.w}×${current.h}). 이제 마디 숫자 영역을 지정하세요.`);
     }
@@ -529,7 +566,7 @@ function addCapture(cropped) {
   renderUi();
 }
 
-function saveCapture(cropped, changeRatio, now, measureCropped = null) {
+function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = null) {
   const fp = fingerprint(cropped.imageData);
   if (state.lastFingerprint) {
     if (
@@ -558,9 +595,10 @@ function saveCapture(cropped, changeRatio, now, measureCropped = null) {
     state.prevMeasureImageData = measureCropped.imageData;
   }
   const label =
-    measureCropped != null
-      ? `저장됨 (마디 숫자 변경)`
-      : `저장됨 (변화 ${(changeRatio * 100).toFixed(1)}%)`;
+    reason ??
+    (measureCropped != null
+      ? "저장됨 (마디 숫자 변경)"
+      : `저장됨 (변화 ${(changeRatio * 100).toFixed(1)}%)`);
   setMessage(label);
   return true;
 }
@@ -633,6 +671,76 @@ async function tickMeasureMode(cropped, measureCropped, now) {
   state.measureChangeStartedAt = 0;
 }
 
+function playheadPageTurn(last, current, scoreWidth) {
+  if (!current.present || !last.present || current.x == null || last.x == null) return false;
+
+  const jumpBack = last.x - current.x;
+  if (jumpBack > scoreWidth * 0.2) return true;
+
+  return last.x > scoreWidth * 0.65 && current.x < scoreWidth * 0.35;
+}
+
+function playheadTrigger(last, current, scoreWidth) {
+  if (!current.present) return false;
+  if (!last.present) return true;
+  return playheadPageTurn(last, current, scoreWidth);
+}
+
+async function tickCursorMode(cropped, now) {
+  const current = detectPlayhead(cropped.imageData);
+  const last = {
+    present: state.lastPlayheadPresent,
+    x: state.lastPlayheadX
+  };
+  const scoreWidth = cropped.width;
+
+  if (state.lastPlayheadX == null) {
+    addCapture(cropped);
+    state.lastImageData = cropped.imageData;
+    state.lastFingerprint = fingerprint(cropped.imageData);
+    state.prevImageData = cropped.imageData;
+    state.lastPlayheadX = current.x;
+    state.lastPlayheadPresent = current.present;
+    state.lastSavedAt = now;
+    state.changeStartedAt = 0;
+    state.cursorChangeStartedAt = 0;
+    setMessage("첫 프레임 저장");
+    return;
+  }
+
+  if (!playheadTrigger(last, current, scoreWidth)) {
+    state.cursorChangeStartedAt = 0;
+    state.lastPlayheadX = current.x;
+    state.lastPlayheadPresent = current.present;
+    return;
+  }
+
+  const scoreFp = fingerprint(cropped.imageData);
+  if (
+    state.lastFingerprint &&
+    fingerprintsSimilar(state.lastFingerprint, scoreFp, SCORE_DUPE_SIMILAR)
+  ) {
+    state.lastPlayheadX = current.x;
+    state.lastPlayheadPresent = current.present;
+    state.cursorChangeStartedAt = 0;
+    return;
+  }
+
+  if (!state.cursorChangeStartedAt) state.cursorChangeStartedAt = now;
+  if (now - state.lastSavedAt < state.minIntervalMs) return;
+
+  const waited = now - state.cursorChangeStartedAt;
+  if (waited < 200) return;
+
+  if (
+    saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")
+  ) {
+    state.lastPlayheadX = current.x;
+    state.lastPlayheadPresent = current.present;
+  }
+  state.cursorChangeStartedAt = 0;
+}
+
 async function tickDiffMode(cropped, now) {
   if (!state.lastImageData) {
     addCapture(cropped);
@@ -683,6 +791,11 @@ async function tick() {
       return;
     }
 
+    if (useCursorCaptureMode()) {
+      await tickCursorMode(cropped, now);
+      return;
+    }
+
     await tickDiffMode(cropped, now);
   } catch (error) {
     setMessage(error.message || String(error), true);
@@ -703,6 +816,9 @@ function startCapture() {
   state.lastMeasureFingerprint = null;
   state.prevMeasureImageData = null;
   state.measureChangeStartedAt = 0;
+  state.lastPlayheadX = null;
+  state.lastPlayheadPresent = false;
+  state.cursorChangeStartedAt = 0;
   state.prevImageData = null;
   state.lastSavedAt = 0;
   state.changeStartedAt = 0;
@@ -711,20 +827,35 @@ function startCapture() {
   setMessage(
     useMeasureCaptureMode()
       ? "캡처 중… (마디 숫자가 바뀔 때 저장)"
-      : "캡처 중… (악보 변화 감지)"
+      : useCursorCaptureMode()
+        ? "캡처 중… (재생 커서가 왼쪽으로 넘어갈 때 저장)"
+        : "캡처 중… (악보 변화 감지)"
   );
   renderUi();
 }
 
 function toggleMeasureMode() {
   if (!state.measureRegion || state.running) return;
-  state.measureModeEnabled = !state.measureModeEnabled;
+  if (state.measureModeEnabled) {
+    setCaptureMode("off");
+    setMessage("악보 변화 감지 모드로 전환되었습니다.");
+  } else {
+    setCaptureMode("measure");
+    setMessage("마디 숫자 우선 캡처 모드가 켜졌습니다. (재생 커서 모드는 자동 꺼짐)");
+  }
   renderUi();
-  setMessage(
-    state.measureModeEnabled
-      ? "마디 숫자 우선 캡처 모드가 켜졌습니다."
-      : "악보 변화 감지 모드로 전환되었습니다."
-  );
+}
+
+function toggleCursorMode() {
+  if (!state.region || state.running) return;
+  if (state.cursorModeEnabled) {
+    setCaptureMode("off");
+    setMessage("악보 변화 감지 모드로 전환되었습니다.");
+  } else {
+    setCaptureMode("cursor");
+    setMessage("재생 커서 인식 캡처 모드가 켜졌습니다. (마디 숫자 모드는 자동 꺼짐)");
+  }
+  renderUi();
 }
 
 function stopCapture() {
@@ -745,6 +876,9 @@ function clearCaptures() {
   state.lastMeasureFingerprint = null;
   state.prevMeasureImageData = null;
   state.measureChangeStartedAt = 0;
+  state.lastPlayheadX = null;
+  state.lastPlayheadPresent = false;
+  state.cursorChangeStartedAt = 0;
   state.prevImageData = null;
   state.changeStartedAt = 0;
   renderThumbs();
@@ -775,6 +909,7 @@ els.btnShare.addEventListener("click", startShare);
 els.btnRegion.addEventListener("click", () => beginRegionSelect("main"));
 els.btnMeasureRegion.addEventListener("click", beginMeasureRegionSelect);
 els.btnMeasureMode.addEventListener("click", toggleMeasureMode);
+els.btnCursorMode.addEventListener("click", toggleCursorMode);
 els.btnStart.addEventListener("click", startCapture);
 els.btnStop.addEventListener("click", () => {
   stopCapture();

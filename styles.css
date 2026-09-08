@@ -110,6 +110,17 @@ button.toggle.on:hover:not(:disabled) {
   background: rgba(30, 136, 229, 0.28);
 }
 
+button.toggle.cursor.on {
+  border-color: var(--accent);
+  background: rgba(229, 57, 53, 0.18);
+  color: #fff;
+}
+
+button.toggle.cursor.on:hover:not(:disabled) {
+  border-color: var(--accent-dim);
+  background: rgba(183, 28, 28, 0.28);
+}
+
 .field {
   display: grid;
   gap: 4px;

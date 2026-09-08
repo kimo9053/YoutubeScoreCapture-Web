@@ -78,6 +78,42 @@ export function fingerprint(imageData, size = 16) {
   return values.join(",");
 }
 
+export function detectPlayhead(imageData) {
+  const { width, height, data } = imageData;
+  let sumX = 0;
+  let count = 0;
+  let minX = width;
+  let maxX = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const a = data[i + 3];
+      if (!isRedHighlight(r, g, b, a)) continue;
+      sumX += x;
+      count += 1;
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+    }
+  }
+
+  if (count === 0) {
+    return { present: false, x: null, minX: null, maxX: null, width: 0, count: 0 };
+  }
+
+  return {
+    present: true,
+    x: Math.round(sumX / count),
+    minX,
+    maxX,
+    width: maxX - minX + 1,
+    count
+  };
+}
+
 export function fingerprintsSimilar(fpA, fpB, maxDiffRatio = 0.08) {
   if (!fpA || !fpB || fpA === fpB) return fpA === fpB;
   const a = fpA.split(",").map(Number);
