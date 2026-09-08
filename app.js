@@ -95,10 +95,14 @@ const SETTLE_RATIO = 0.015;
 /** 페이지 전환 중에도 이 시간이 지나면 강제 저장 */
 const MAX_SETTLE_WAIT_MS = 1200;
 
-/** 마디 숫자 잉크 변화율 (슬라이더와 별개 — 숫자 한 자리 변경도 잡음) */
-const MEASURE_INK_RATIO = 0.08;
-/** 트리거 모드 전용 최소 간격 (슬라이더 1초여도 연속 페이지를 놓치지 않음) */
-const TRIGGER_MIN_INTERVAL_MS = 160;
+/** 마디 숫자 잉크 변화율 (2배속·작은 숫자 변경도 잡음) */
+const MEASURE_INK_RATIO = 0.03;
+/** 마디 영역 전체 픽셀 변화율 (잉크가 적어도 감지) */
+const MEASURE_PIXEL_RATIO = 0.018;
+/** 커서 모드에서 악보 내용이 바뀌면 커서를 못 봐도 저장 */
+const CURSOR_SCORE_RATIO = 0.03;
+/** 트리거 모드 최소 간격 — 2배속 연속 페이지용 */
+const TRIGGER_MIN_INTERVAL_MS = 70;
 /** 같은 악보 페이지로 보는 score fingerprint 유사도 (변화 감지 모드 전용) */
 const SCORE_DUPE_SIMILAR = 0.06;
 
@@ -377,8 +381,8 @@ async function startShare() {
     }
 
     const videoConstraints = platform.isMobile
-      ? { frameRate: 10 }
-      : { frameRate: 10, displaySurface: "browser" };
+      ? { frameRate: 24 }
+      : { frameRate: 30, displaySurface: "browser" };
 
     const displayMediaOptions = {
       video: videoConstraints,
@@ -615,8 +619,17 @@ function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = 
 function measureNumberChanged(measureCropped) {
   if (!measureCropped || !state.lastMeasureImageData) return false;
 
-  const { changeRatio } = compareMeasureInk(state.lastMeasureImageData, measureCropped.imageData);
-  return changeRatio >= MEASURE_INK_RATIO;
+  const ink = compareMeasureInk(state.lastMeasureImageData, measureCropped.imageData);
+  if (ink.changeRatio >= MEASURE_INK_RATIO) return true;
+
+  const pixels = compareImageData(state.lastMeasureImageData, measureCropped.imageData);
+  if (pixels.changeRatio >= MEASURE_PIXEL_RATIO) return true;
+
+  const fp = fingerprint(measureCropped.imageData);
+  if (state.lastMeasureFingerprint && !fingerprintsSimilar(state.lastMeasureFingerprint, fp, 0.12)) {
+    return true;
+  }
+  return false;
 }
 
 async function tickMeasureMode(cropped, measureCropped, now) {
@@ -654,6 +667,16 @@ function resetCursorTrack(x = null) {
   state.cursorPendingAt = 0;
 }
 
+function maybeSaveCursorByScore(cropped, now) {
+  if (!state.lastImageData) return false;
+  if (now - state.lastSavedAt < triggerMinIntervalMs()) return false;
+
+  const { changeRatio } = compareImageData(state.lastImageData, cropped.imageData);
+  if (changeRatio < CURSOR_SCORE_RATIO) return false;
+
+  return saveCapture(cropped, changeRatio, now, null, "저장됨 (재생 커서 · 악보 전환)");
+}
+
 async function tickCursorMode(cropped, now) {
   const current = detectPlayhead(cropped.imageData);
   const scoreWidth = cropped.width;
@@ -665,7 +688,7 @@ async function tickCursorMode(cropped, now) {
     state.prevImageData = cropped.imageData;
     state.lastSavedAt = now;
     resetCursorTrack(current.present ? current.x : null);
-    if (current.present && current.x > scoreWidth * 0.38) state.playheadArmed = true;
+    if (current.present && current.x > scoreWidth * 0.25) state.playheadArmed = true;
     setMessage("첫 프레임 저장");
     return;
   }
@@ -675,18 +698,19 @@ async function tickCursorMode(cropped, now) {
     if (
       state.playheadArmed &&
       state.lastPlayheadX != null &&
-      state.lastPlayheadX > scoreWidth * 0.42 &&
+      state.lastPlayheadX > scoreWidth * 0.28 &&
       now - state.lastSavedAt >= triggerMinIntervalMs()
     ) {
       state.cursorPendingAt = state.cursorPendingAt || now;
     }
+    maybeSaveCursorByScore(cropped, now);
     return;
   }
 
   if (
     state.cursorPendingAt &&
-    current.x < scoreWidth * 0.4 &&
-    (state.playheadPeakX ?? 0) > scoreWidth * 0.42 &&
+    current.x < scoreWidth * 0.5 &&
+    (state.playheadPeakX ?? 0) > scoreWidth * 0.28 &&
     now - state.cursorPendingAt < 900 &&
     now - state.lastSavedAt >= triggerMinIntervalMs()
   ) {
@@ -700,33 +724,37 @@ async function tickCursorMode(cropped, now) {
   const x = current.x;
   if (state.lastPlayheadX == null) {
     resetCursorTrack(x);
-    if (x > scoreWidth * 0.38) state.playheadArmed = true;
+    if (x > scoreWidth * 0.25) state.playheadArmed = true;
     return;
   }
 
-  if (x >= state.lastPlayheadX - Math.max(4, scoreWidth * 0.008)) {
+  if (x >= state.lastPlayheadX - Math.max(3, scoreWidth * 0.006)) {
     state.playheadPeakX =
       state.playheadPeakX == null ? x : Math.max(state.playheadPeakX, x);
-    if (x > scoreWidth * 0.38) state.playheadArmed = true;
+    if (x > scoreWidth * 0.25) state.playheadArmed = true;
     state.lastPlayheadX = x;
+    maybeSaveCursorByScore(cropped, now);
     return;
   }
 
   const peak = state.playheadPeakX ?? state.lastPlayheadX;
   const jumpLeft = peak - x;
   const wrapped =
-    jumpLeft > scoreWidth * 0.18 &&
-    (state.playheadArmed || peak > scoreWidth * 0.4) &&
-    x < scoreWidth * 0.42;
+    jumpLeft > scoreWidth * 0.1 &&
+    (state.playheadArmed || peak > scoreWidth * 0.28) &&
+    x < scoreWidth * 0.55;
 
   state.lastPlayheadX = x;
 
-  if (!wrapped) return;
+  if (!wrapped) {
+    maybeSaveCursorByScore(cropped, now);
+    return;
+  }
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return;
 
   if (saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) {
     resetCursorTrack(x);
-    if (x > scoreWidth * 0.38) state.playheadArmed = true;
+    if (x > scoreWidth * 0.25) state.playheadArmed = true;
   } else {
     state.playheadArmed = false;
     state.playheadPeakX = x;
@@ -815,7 +843,7 @@ function startCapture() {
   state.prevImageData = null;
   state.lastSavedAt = 0;
   state.changeStartedAt = 0;
-  state.timerId = setInterval(tick, 100);
+  state.timerId = setInterval(tick, 50);
   tick();
   setMessage(
     useMeasureCaptureMode()

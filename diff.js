@@ -10,6 +10,12 @@ function isRedHighlight(r, g, b, a) {
   return r >= RED_R_MIN && g <= RED_G_MAX && b <= RED_B_MAX && r - Math.max(g, b) >= RED_DOMINANCE;
 }
 
+/** 2배속 모션블러로 흐려진 재생선도 포함 */
+function isRedHighlightLoose(r, g, b, a) {
+  if (a < 40) return true;
+  return r >= 130 && r > g + 12 && r > b + 12 && g <= 170 && b <= 170;
+}
+
 function grayOf(r, g, b) {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
@@ -131,13 +137,13 @@ export function detectPlayhead(imageData) {
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = (y * width + x) * 4;
-      if (!isRedHighlight(data[i], data[i + 1], data[i + 2], data[i + 3])) continue;
+      if (!isRedHighlightLoose(data[i], data[i + 1], data[i + 2], data[i + 3])) continue;
       cols[x] += 1;
       count += 1;
     }
   }
 
-  const minCount = Math.max(12, Math.round(height * 0.06));
+  const minCount = Math.max(8, Math.round(height * 0.03));
   if (count < minCount) {
     return { present: false, x: null, minX: null, maxX: null, width: 0, count };
   }
@@ -151,7 +157,7 @@ export function detectPlayhead(imageData) {
     }
   }
 
-  const band = Math.max(2, Math.round(width * 0.012));
+  const band = Math.max(3, Math.round(width * 0.025));
   let inBand = 0;
   let minX = width;
   let maxX = 0;
@@ -163,7 +169,7 @@ export function detectPlayhead(imageData) {
   }
 
   // 세로 선이 아니면(퍼진 빨간 UI) 커서로 보지 않음
-  if (inBand / count < 0.42 || peak < height * 0.05) {
+  if (inBand / count < 0.25 || peak < height * 0.025) {
     return { present: false, x: null, minX: null, maxX: null, width: 0, count };
   }
 
