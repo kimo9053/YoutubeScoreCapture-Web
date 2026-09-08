@@ -17,6 +17,7 @@ const els = {
   btnCursorMode: $("btnCursorMode"),
   btnStart: $("btnStart"),
   btnStop: $("btnStop"),
+  btnManual: $("btnManual"),
   btnPdf: $("btnPdf"),
   btnClear: $("btnClear"),
   btnDeleteSelected: $("btnDeleteSelected"),
@@ -83,6 +84,7 @@ const state = {
   playheadPeakX: null,
   playheadArmed: false,
   cursorPendingAt: 0,
+  cursorAwaitingNewPage: false,
   lastSavedAt: 0,
   prevImageData: null,
   changeStartedAt: 0,
@@ -125,8 +127,29 @@ function getPdfColumns() {
   return Number(checked?.value || state.pdfColumns || 2);
 }
 
+function canManualCapture() {
+  return Boolean(state.stream && state.region && !state.running);
+}
+
+function addInsertSlot(index) {
+  const slot = document.createElement("button");
+  slot.type = "button";
+  slot.className = "thumb-insert";
+  slot.title = index === 0 ? "맨 앞에 삽입" : `${index}번과 ${index + 1}번 사이에 삽입`;
+  slot.textContent = "+";
+  slot.disabled = !canManualCapture();
+  slot.addEventListener("click", (e) => {
+    e.stopPropagation();
+    manualCapture(index);
+  });
+  els.thumbs.appendChild(slot);
+}
+
 function renderThumbs() {
   els.thumbs.innerHTML = "";
+  const showInsert = canManualCapture() && state.captures.length > 0;
+  if (showInsert) addInsertSlot(0);
+
   state.captures.forEach((item, index) => {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -145,6 +168,7 @@ function renderThumbs() {
     btn.append(badge, img);
     btn.addEventListener("click", () => toggleSelect(item.id));
     els.thumbs.appendChild(btn);
+    if (showInsert) addInsertSlot(index + 1);
   });
 }
 
@@ -234,6 +258,7 @@ function renderUi() {
     : "재생 커서 인식 캡처: 꺼짐";
   els.btnStart.disabled = !hasStream || !hasRegion || state.running;
   els.btnStop.disabled = !state.running;
+  els.btnManual.disabled = !canManualCapture();
   els.btnShare.disabled = state.running;
   els.btnPdf.disabled = count === 0;
   els.btnClear.disabled = count === 0 || state.running;
@@ -567,7 +592,7 @@ function ensureDataUrl(cropped) {
   };
 }
 
-function addCapture(cropped) {
+function addCapture(cropped, insertIndex = null) {
   const ready = ensureDataUrl(cropped);
   const item = {
     id: nextCaptureId++,
@@ -576,22 +601,76 @@ function addCapture(cropped) {
     height: ready.height,
     createdAt: Date.now()
   };
-  state.captures.push(item);
+  if (
+    insertIndex == null ||
+    insertIndex < 0 ||
+    insertIndex >= state.captures.length
+  ) {
+    state.captures.push(item);
+  } else {
+    state.captures.splice(insertIndex, 0, item);
+  }
   renderThumbs();
   renderUi();
+  return item;
+}
+
+function insertIndexFromSelection() {
+  if (state.selectedIds.size === 0) return state.captures.length;
+  let maxIdx = -1;
+  state.captures.forEach((c, i) => {
+    if (state.selectedIds.has(c.id)) maxIdx = Math.max(maxIdx, i);
+  });
+  return maxIdx + 1;
+}
+
+function manualCapture(insertIndex = null) {
+  if (!canManualCapture()) {
+    setMessage("중지한 뒤 화면 공유와 악보 영역이 있을 때 수동 캡처할 수 있습니다.", true);
+    return;
+  }
+  const cropped = grabCrop({ withDataUrl: true });
+  if (!cropped) {
+    setMessage("현재 화면을 캡처하지 못했습니다.", true);
+    return;
+  }
+  const index = insertIndex == null ? insertIndexFromSelection() : insertIndex;
+  const item = addCapture(cropped, index);
+  state.selectedIds = new Set([item.id]);
+  renderThumbs();
+  renderUi();
+  const pos = state.captures.findIndex((c) => c.id === item.id) + 1;
+  setMessage(`수동 캡처를 ${pos}번 위치에 넣었습니다.`);
+}
+
+function isSameAsLastScore(cropped) {
+  if (!cropped) return false;
+  const fp = fingerprint(cropped.imageData);
+  if (state.lastFingerprint) {
+    if (
+      state.lastFingerprint === fp ||
+      fingerprintsSimilar(state.lastFingerprint, fp, 0.08)
+    ) {
+      return true;
+    }
+  }
+  if (state.lastImageData) {
+    const { changeRatio } = compareImageData(state.lastImageData, cropped.imageData);
+    if (changeRatio < 0.025) return true;
+  }
+  return false;
 }
 
 function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = null) {
   const fp = fingerprint(cropped.imageData);
-  const allowSimilarScore = Boolean(measureCropped) || useCursorCaptureMode();
-  if (state.lastFingerprint && !allowSimilarScore) {
-    if (
-      state.lastFingerprint === fp ||
-      fingerprintsSimilar(state.lastFingerprint, fp, SCORE_DUPE_SIMILAR)
-    ) {
-      state.changeStartedAt = 0;
-      return false;
+  if (state.lastFingerprint && isSameAsLastScore(cropped)) {
+    state.changeStartedAt = 0;
+    if (measureCropped) {
+      state.lastMeasureImageData = measureCropped.imageData;
+      state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
+      state.prevMeasureImageData = measureCropped.imageData;
     }
+    return false;
   }
 
   addCapture(cropped);
@@ -654,6 +733,14 @@ async function tickMeasureMode(cropped, measureCropped, now) {
 
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return;
 
+  // 숫자가 바뀌어도 아직 이전 악보면 새 페이지가 그려질 때까지 대기
+  if (isSameAsLastScore(cropped)) {
+    if (!state.measureChangeStartedAt) state.measureChangeStartedAt = now;
+    if (now - state.measureChangeStartedAt < 900) return;
+    state.measureChangeStartedAt = 0;
+    return;
+  }
+
   saveCapture(cropped, 1, now, measureCropped);
   state.measureChangeStartedAt = 0;
 }
@@ -669,9 +756,19 @@ function armCursorIfOnRight(x, scoreWidth) {
   if (x != null && x > scoreWidth * 0.62) state.playheadArmed = true;
 }
 
+function beginAwaitNewPage(x) {
+  state.cursorAwaitingNewPage = true;
+  state.cursorPendingAt = Date.now();
+  state.playheadArmed = false;
+  state.playheadPeakX = x;
+  state.lastPlayheadX = x;
+}
+
 function saveCursorPageTurn(cropped, now, x) {
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return false;
+  if (isSameAsLastScore(cropped)) return false;
   if (!saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) return false;
+  state.cursorAwaitingNewPage = false;
   resetCursorTrack(x);
   return true;
 }
@@ -687,8 +784,21 @@ async function tickCursorMode(cropped, now) {
     state.prevImageData = cropped.imageData;
     state.lastSavedAt = now;
     resetCursorTrack(current.present ? current.x : null);
+    state.cursorAwaitingNewPage = false;
     if (current.present) armCursorIfOnRight(current.x, scoreWidth);
     setMessage("첫 프레임 저장");
+    return;
+  }
+
+  if (state.cursorAwaitingNewPage) {
+    if (!isSameAsLastScore(cropped)) {
+      saveCursorPageTurn(cropped, now, current.present ? current.x : state.lastPlayheadX);
+      return;
+    }
+    if (now - state.cursorPendingAt > 1000) {
+      state.cursorAwaitingNewPage = false;
+      state.cursorPendingAt = 0;
+    }
     return;
   }
 
@@ -708,7 +818,7 @@ async function tickCursorMode(cropped, now) {
     (state.playheadPeakX ?? 0) > scoreWidth * 0.62 &&
     now - state.cursorPendingAt < 800
   ) {
-    saveCursorPageTurn(cropped, now, x);
+    beginAwaitNewPage(x);
     return;
   }
   state.cursorPendingAt = 0;
@@ -737,7 +847,7 @@ async function tickCursorMode(cropped, now) {
   state.lastPlayheadX = x;
   if (!wrapped) return;
 
-  saveCursorPageTurn(cropped, now, x);
+  beginAwaitNewPage(x);
 }
 
 async function tickDiffMode(cropped, now) {
@@ -819,11 +929,13 @@ function startCapture() {
   state.playheadPeakX = null;
   state.playheadArmed = false;
   state.cursorPendingAt = 0;
+  state.cursorAwaitingNewPage = false;
   state.prevImageData = null;
   state.lastSavedAt = 0;
   state.changeStartedAt = 0;
   state.timerId = setInterval(tick, 50);
   tick();
+  renderThumbs();
   setMessage(
     useMeasureCaptureMode()
       ? "캡처 중… (마디 숫자가 바뀔 때 저장)"
@@ -860,10 +972,12 @@ function toggleCursorMode() {
 
 function stopCapture() {
   state.running = false;
+  state.cursorAwaitingNewPage = false;
   if (state.timerId) {
     clearInterval(state.timerId);
     state.timerId = null;
   }
+  renderThumbs();
   renderUi();
 }
 
@@ -880,6 +994,7 @@ function clearCaptures() {
   state.playheadPeakX = null;
   state.playheadArmed = false;
   state.cursorPendingAt = 0;
+  state.cursorAwaitingNewPage = false;
   state.prevImageData = null;
   state.changeStartedAt = 0;
   renderThumbs();
@@ -914,8 +1029,9 @@ els.btnCursorMode.addEventListener("click", toggleCursorMode);
 els.btnStart.addEventListener("click", startCapture);
 els.btnStop.addEventListener("click", () => {
   stopCapture();
-  setMessage("중지됨");
+  setMessage("중지됨. 수동 캡처로 빈 자리를 넣을 수 있습니다.");
 });
+els.btnManual.addEventListener("click", () => manualCapture());
 els.btnClear.addEventListener("click", clearCaptures);
 els.btnDeleteSelected.addEventListener("click", deleteSelected);
 els.btnSelectAll.addEventListener("click", selectAll);
