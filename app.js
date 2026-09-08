@@ -7,6 +7,7 @@ const els = {
   btnShare: $("btnShare"),
   btnRegion: $("btnRegion"),
   btnMeasureRegion: $("btnMeasureRegion"),
+  btnMeasureMode: $("btnMeasureMode"),
   btnStart: $("btnStart"),
   btnStop: $("btnStop"),
   btnPdf: $("btnPdf"),
@@ -57,6 +58,7 @@ const state = {
   selectingMeasure: false,
   region: null,
   measureRegion: null,
+  measureModeEnabled: false,
   running: false,
   timerId: null,
   capturing: false,
@@ -162,15 +164,25 @@ function mobileShareMessage() {
   return "이 브라우저는 화면 공유를 지원하지 않습니다. PC Chrome/Edge를 사용해 주세요.";
 }
 
+function useMeasureCaptureMode() {
+  return state.measureModeEnabled && Boolean(state.measureRegion);
+}
+
 function renderUi() {
   const hasStream = Boolean(state.stream);
   const hasRegion = Boolean(state.region);
   const hasMeasureRegion = Boolean(state.measureRegion);
+  const measureModeOn = useMeasureCaptureMode();
   const count = state.captures.length;
   const selected = state.selectedIds.size;
 
   els.btnRegion.disabled = !hasStream || state.running;
   els.btnMeasureRegion.disabled = !hasStream || !hasRegion || state.running;
+  els.btnMeasureMode.disabled = !hasMeasureRegion || state.running;
+  els.btnMeasureMode.classList.toggle("on", measureModeOn);
+  els.btnMeasureMode.textContent = measureModeOn
+    ? "마디 숫자 우선 캡처: 켜짐"
+    : "마디 숫자 우선 캡처: 꺼짐";
   els.btnStart.disabled = !hasStream || !hasRegion || state.running;
   els.btnStop.disabled = !state.running;
   els.btnShare.disabled = state.running;
@@ -189,16 +201,18 @@ function renderUi() {
   els.selectedText.textContent = `선택: ${selected}장`;
   els.statusDot.classList.toggle("on", state.running);
   els.statusText.textContent = state.running
-    ? hasMeasureRegion
+    ? measureModeOn
       ? "캡처 중 (마디 숫자)"
       : "캡처 중"
-    : hasRegion && hasMeasureRegion
-      ? "준비됨"
-      : hasRegion
-        ? "마디 숫자 영역 권장"
-        : hasStream
-          ? "악보 영역 지정 필요"
-          : "대기";
+    : hasRegion && measureModeOn
+      ? "준비됨 (마디 숫자 모드)"
+      : hasRegion && hasMeasureRegion
+        ? "마디 숫자 모드 켜기"
+        : hasRegion
+          ? "마디 숫자 영역 권장"
+          : hasStream
+            ? "악보 영역 지정 필요"
+            : "대기";
 
   if (hasRegion) {
     els.regionText.textContent = `악보 영역: ${state.region.w}×${state.region.h} px`;
@@ -332,6 +346,7 @@ async function startShare() {
     state.stream = stream;
     state.region = null;
     state.measureRegion = null;
+    state.measureModeEnabled = false;
     els.preview.srcObject = stream;
     await els.preview.play();
 
@@ -341,6 +356,7 @@ async function startShare() {
       els.preview.srcObject = null;
       state.region = null;
       state.measureRegion = null;
+      state.measureModeEnabled = false;
       setMessage("화면 공유가 종료되었습니다.");
       renderUi();
       drawOverlay();
@@ -417,10 +433,11 @@ function beginRegionSelect(mode = "main") {
     if (mode === "measure") {
       state.measureRegion = current;
       cleanup();
-      setMessage(`마디 숫자 영역 지정됨 (${current.w}×${current.h})`);
+      setMessage(`마디 숫자 영역 지정됨 (${current.w}×${current.h}). '마디 숫자 우선 캡처'를 켜세요.`);
     } else {
       state.region = current;
       state.measureRegion = null;
+      state.measureModeEnabled = false;
       cleanup();
       setMessage(`악보 영역 지정됨 (${current.w}×${current.h}). 이제 마디 숫자 영역을 지정하세요.`);
     }
@@ -612,7 +629,7 @@ async function tick() {
     if (!cropped) return;
 
     const now = Date.now();
-    if (state.measureRegion) {
+    if (useMeasureCaptureMode()) {
       const measureCropped = grabMeasureCrop();
       if (!measureCropped) return;
       await tickMeasureMode(cropped, measureCropped, now);
@@ -643,11 +660,22 @@ function startCapture() {
   state.timerId = setInterval(tick, 100);
   tick();
   setMessage(
-    state.measureRegion
+    useMeasureCaptureMode()
       ? "캡처 중… (마디 숫자가 바뀔 때 저장)"
-      : "캡처 중… (마디 숫자 영역을 지정하면 더 정확합니다)"
+      : "캡처 중… (악보 변화 감지)"
   );
   renderUi();
+}
+
+function toggleMeasureMode() {
+  if (!state.measureRegion || state.running) return;
+  state.measureModeEnabled = !state.measureModeEnabled;
+  renderUi();
+  setMessage(
+    state.measureModeEnabled
+      ? "마디 숫자 우선 캡처 모드가 켜졌습니다."
+      : "악보 변화 감지 모드로 전환되었습니다."
+  );
 }
 
 function stopCapture() {
@@ -695,6 +723,7 @@ async function makePdf() {
 els.btnShare.addEventListener("click", startShare);
 els.btnRegion.addEventListener("click", () => beginRegionSelect("main"));
 els.btnMeasureRegion.addEventListener("click", beginMeasureRegionSelect);
+els.btnMeasureMode.addEventListener("click", toggleMeasureMode);
 els.btnStart.addEventListener("click", startCapture);
 els.btnStop.addEventListener("click", () => {
   stopCapture();

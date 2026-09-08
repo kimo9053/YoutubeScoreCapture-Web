@@ -99,6 +99,17 @@ button.danger {
   background: transparent;
 }
 
+button.toggle.on {
+  border-color: #42a5f5;
+  background: rgba(66, 165, 245, 0.18);
+  color: #fff;
+}
+
+button.toggle.on:hover:not(:disabled) {
+  border-color: #1e88e5;
+  background: rgba(30, 136, 229, 0.28);
+}
+
 .field {
   display: grid;
   gap: 4px;
@@ -322,8 +333,9 @@ input[type="number"] {
 
 .thumb .badge {
   position: absolute;
-  top: 4px;
-  left: 4px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   min-width: 18px;
   height: 18px;
   padding: 0 4px;
