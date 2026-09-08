@@ -1,4 +1,4 @@
-import { compareImageData, fingerprint } from "./diff.js";
+import { compareImageData, fingerprint, fingerprintsSimilar } from "./diff.js";
 import { buildPdf, downloadBlob } from "./pdf.js";
 
 const $ = (id) => document.getElementById(id);
@@ -69,6 +69,8 @@ const state = {
   lastFingerprint: null,
   lastMeasureFingerprint: null,
   lastMeasureImageData: null,
+  prevMeasureImageData: null,
+  measureChangeStartedAt: 0,
   lastSavedAt: 0,
   prevImageData: null,
   changeStartedAt: 0,
@@ -81,8 +83,10 @@ const SETTLE_RATIO = 0.015;
 /** 페이지 전환 중에도 이 시간이 지나면 강제 저장 */
 const MAX_SETTLE_WAIT_MS = 1200;
 
-/** 마디 숫자 영역 변화 감지 임계값 (작은 글자라 낮게) */
-const MEASURE_SENSITIVITY = 0.04;
+/** 마디 숫자 fingerprint 유사도 (낮을수록 엄격) */
+const MEASURE_FP_SIMILAR = 0.04;
+/** 같은 악보 페이지로 보는 score fingerprint 유사도 */
+const SCORE_DUPE_SIMILAR = 0.06;
 
 const workCanvas = document.createElement("canvas");
 const workCtx = workCanvas.getContext("2d", { willReadFrequently: true });
@@ -527,14 +531,19 @@ function addCapture(cropped) {
 
 function saveCapture(cropped, changeRatio, now, measureCropped = null) {
   const fp = fingerprint(cropped.imageData);
-  // 픽셀 변화가 있어도 16x16 fingerprint는 악보끼리 비슷해 보이기 쉬움 → 완전 동일만 중복 처리
-  if (state.lastFingerprint && state.lastFingerprint === fp) {
-    state.changeStartedAt = 0;
-    if (measureCropped) {
-      state.lastMeasureImageData = measureCropped.imageData;
-      state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
+  if (state.lastFingerprint) {
+    if (
+      state.lastFingerprint === fp ||
+      fingerprintsSimilar(state.lastFingerprint, fp, SCORE_DUPE_SIMILAR)
+    ) {
+      state.changeStartedAt = 0;
+      if (measureCropped) {
+        state.lastMeasureImageData = measureCropped.imageData;
+        state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
+        state.prevMeasureImageData = measureCropped.imageData;
+      }
+      return false;
     }
-    return false;
   }
 
   addCapture(cropped);
@@ -546,6 +555,7 @@ function saveCapture(cropped, changeRatio, now, measureCropped = null) {
   if (measureCropped) {
     state.lastMeasureImageData = measureCropped.imageData;
     state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
+    state.prevMeasureImageData = measureCropped.imageData;
   }
   const label =
     measureCropped != null
@@ -557,13 +567,20 @@ function saveCapture(cropped, changeRatio, now, measureCropped = null) {
 
 function measureNumberChanged(measureCropped) {
   if (!measureCropped) return false;
-  if (!state.lastMeasureImageData) return true;
+  if (!state.lastMeasureFingerprint) return true;
 
-  const { changeRatio } = compareImageData(state.lastMeasureImageData, measureCropped.imageData);
-  if (changeRatio >= MEASURE_SENSITIVITY) return true;
+  const measureFp = fingerprint(measureCropped.imageData);
+  if (fingerprintsSimilar(state.lastMeasureFingerprint, measureFp, MEASURE_FP_SIMILAR)) {
+    return false;
+  }
 
-  const fp = fingerprint(measureCropped.imageData);
-  return Boolean(state.lastMeasureFingerprint && state.lastMeasureFingerprint !== fp);
+  // 재생 커서 등 노이즈: 픽셀 변화율이 사용자 임계값 미만이면 무시
+  if (state.lastMeasureImageData) {
+    const { changeRatio } = compareImageData(state.lastMeasureImageData, measureCropped.imageData);
+    if (changeRatio < state.sensitivity) return false;
+  }
+
+  return true;
 }
 
 async function tickMeasureMode(cropped, measureCropped, now) {
@@ -574,16 +591,46 @@ async function tickMeasureMode(cropped, measureCropped, now) {
     state.prevImageData = cropped.imageData;
     state.lastMeasureImageData = measureCropped.imageData;
     state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
+    state.prevMeasureImageData = measureCropped.imageData;
     state.lastSavedAt = now;
     state.changeStartedAt = 0;
+    state.measureChangeStartedAt = 0;
     setMessage("첫 프레임 저장");
     return;
   }
 
-  if (!measureNumberChanged(measureCropped)) return;
+  if (!measureNumberChanged(measureCropped)) {
+    state.measureChangeStartedAt = 0;
+    state.prevMeasureImageData = measureCropped.imageData;
+    return;
+  }
+
+  // 마디 영역만 흔들리고 악보는 같으면 오탐 → 기준만 갱신
+  const scoreFp = fingerprint(cropped.imageData);
+  if (
+    state.lastFingerprint &&
+    fingerprintsSimilar(state.lastFingerprint, scoreFp, SCORE_DUPE_SIMILAR)
+  ) {
+    state.lastMeasureImageData = measureCropped.imageData;
+    state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
+    state.prevMeasureImageData = measureCropped.imageData;
+    state.measureChangeStartedAt = 0;
+    return;
+  }
+
+  if (!state.measureChangeStartedAt) state.measureChangeStartedAt = now;
   if (now - state.lastSavedAt < state.minIntervalMs) return;
 
+  const vsPrev = state.prevMeasureImageData
+    ? compareImageData(state.prevMeasureImageData, measureCropped.imageData).changeRatio
+    : 1;
+  state.prevMeasureImageData = measureCropped.imageData;
+
+  const waited = now - state.measureChangeStartedAt;
+  if (vsPrev > SETTLE_RATIO && waited < MAX_SETTLE_WAIT_MS) return;
+
   saveCapture(cropped, 1, now, measureCropped);
+  state.measureChangeStartedAt = 0;
 }
 
 async function tickDiffMode(cropped, now) {
@@ -654,6 +701,8 @@ function startCapture() {
   state.lastFingerprint = null;
   state.lastMeasureImageData = null;
   state.lastMeasureFingerprint = null;
+  state.prevMeasureImageData = null;
+  state.measureChangeStartedAt = 0;
   state.prevImageData = null;
   state.lastSavedAt = 0;
   state.changeStartedAt = 0;
@@ -694,6 +743,8 @@ function clearCaptures() {
   state.lastFingerprint = null;
   state.lastMeasureImageData = null;
   state.lastMeasureFingerprint = null;
+  state.prevMeasureImageData = null;
+  state.measureChangeStartedAt = 0;
   state.prevImageData = null;
   state.changeStartedAt = 0;
   renderThumbs();
