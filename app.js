@@ -96,11 +96,15 @@ const SETTLE_RATIO = 0.015;
 const MAX_SETTLE_WAIT_MS = 1200;
 
 /** 마디 숫자 잉크 변화율 (슬라이더와 별개 — 숫자 한 자리 변경도 잡음) */
-const MEASURE_INK_RATIO = 0.14;
-/** 마디 숫자가 안정됐다고 볼 연속 잉크 변화율 */
-const MEASURE_SETTLE_RATIO = 0.06;
+const MEASURE_INK_RATIO = 0.08;
+/** 트리거 모드 전용 최소 간격 (슬라이더 1초여도 연속 페이지를 놓치지 않음) */
+const TRIGGER_MIN_INTERVAL_MS = 160;
 /** 같은 악보 페이지로 보는 score fingerprint 유사도 (변화 감지 모드 전용) */
 const SCORE_DUPE_SIMILAR = 0.06;
+
+function triggerMinIntervalMs() {
+  return Math.min(state.minIntervalMs, TRIGGER_MIN_INTERVAL_MS);
+}
 
 const workCanvas = document.createElement("canvas");
 const workCtx = workCanvas.getContext("2d", { willReadFrequently: true });
@@ -637,25 +641,7 @@ async function tickMeasureMode(cropped, measureCropped, now) {
     return;
   }
 
-  if (!state.measureChangeStartedAt) state.measureChangeStartedAt = now;
-  if (now - state.lastSavedAt < state.minIntervalMs) return;
-
-  const vsPrev = state.prevMeasureImageData
-    ? compareMeasureInk(state.prevMeasureImageData, measureCropped.imageData).changeRatio
-    : 1;
-  state.prevMeasureImageData = measureCropped.imageData;
-
-  const waited = now - state.measureChangeStartedAt;
-  if (vsPrev > MEASURE_SETTLE_RATIO && waited < MAX_SETTLE_WAIT_MS) return;
-
-  const measureFp = fingerprint(measureCropped.imageData);
-  if (
-    state.lastMeasureFingerprint &&
-    fingerprintsSimilar(state.lastMeasureFingerprint, measureFp, 0.02)
-  ) {
-    state.measureChangeStartedAt = 0;
-    return;
-  }
+  if (now - state.lastSavedAt < triggerMinIntervalMs()) return;
 
   saveCapture(cropped, 1, now, measureCropped);
   state.measureChangeStartedAt = 0;
@@ -679,53 +665,71 @@ async function tickCursorMode(cropped, now) {
     state.prevImageData = cropped.imageData;
     state.lastSavedAt = now;
     resetCursorTrack(current.present ? current.x : null);
-    if (current.present && current.x > scoreWidth * 0.55) state.playheadArmed = true;
+    if (current.present && current.x > scoreWidth * 0.38) state.playheadArmed = true;
     setMessage("첫 프레임 저장");
     return;
   }
 
-  // 커서가 한 프레임 안 보여도 이전 위치를 유지 — 깜빡임을 페이지 전환으로 보지 않음
-  if (!current.present) return;
+  // 커서가 잠깐 안 보여도 이전 위치를 유지. 오른쪽에서 사라진 뒤 왼쪽에 나타나면 페이지 전환.
+  if (!current.present) {
+    if (
+      state.playheadArmed &&
+      state.lastPlayheadX != null &&
+      state.lastPlayheadX > scoreWidth * 0.42 &&
+      now - state.lastSavedAt >= triggerMinIntervalMs()
+    ) {
+      state.cursorPendingAt = state.cursorPendingAt || now;
+    }
+    return;
+  }
+
+  if (
+    state.cursorPendingAt &&
+    current.x < scoreWidth * 0.4 &&
+    (state.playheadPeakX ?? 0) > scoreWidth * 0.42 &&
+    now - state.cursorPendingAt < 900 &&
+    now - state.lastSavedAt >= triggerMinIntervalMs()
+  ) {
+    if (saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) {
+      resetCursorTrack(current.x);
+      return;
+    }
+  }
+  state.cursorPendingAt = 0;
 
   const x = current.x;
   if (state.lastPlayheadX == null) {
     resetCursorTrack(x);
-    if (x > scoreWidth * 0.55) state.playheadArmed = true;
+    if (x > scoreWidth * 0.38) state.playheadArmed = true;
     return;
   }
 
-  if (x >= state.lastPlayheadX - Math.max(6, scoreWidth * 0.01)) {
+  if (x >= state.lastPlayheadX - Math.max(4, scoreWidth * 0.008)) {
     state.playheadPeakX =
       state.playheadPeakX == null ? x : Math.max(state.playheadPeakX, x);
-    if (x > scoreWidth * 0.55) state.playheadArmed = true;
+    if (x > scoreWidth * 0.38) state.playheadArmed = true;
     state.lastPlayheadX = x;
-    state.cursorPendingAt = 0;
     return;
   }
 
   const peak = state.playheadPeakX ?? state.lastPlayheadX;
+  const jumpLeft = peak - x;
   const wrapped =
-    state.playheadArmed &&
-    x < scoreWidth * 0.3 &&
-    peak - x > scoreWidth * 0.35;
+    jumpLeft > scoreWidth * 0.18 &&
+    (state.playheadArmed || peak > scoreWidth * 0.4) &&
+    x < scoreWidth * 0.42;
 
   state.lastPlayheadX = x;
 
-  if (!wrapped) {
-    state.cursorPendingAt = 0;
-    return;
-  }
-
-  if (!state.cursorPendingAt) state.cursorPendingAt = now;
-  if (now - state.lastSavedAt < state.minIntervalMs) return;
-  if (now - state.cursorPendingAt < 250) return;
+  if (!wrapped) return;
+  if (now - state.lastSavedAt < triggerMinIntervalMs()) return;
 
   if (saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) {
     resetCursorTrack(x);
+    if (x > scoreWidth * 0.38) state.playheadArmed = true;
   } else {
     state.playheadArmed = false;
     state.playheadPeakX = x;
-    state.cursorPendingAt = 0;
   }
 }
 
