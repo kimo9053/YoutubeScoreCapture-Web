@@ -99,8 +99,6 @@ const MAX_SETTLE_WAIT_MS = 1200;
 const MEASURE_INK_RATIO = 0.03;
 /** 마디 영역 전체 픽셀 변화율 (잉크가 적어도 감지) */
 const MEASURE_PIXEL_RATIO = 0.018;
-/** 커서 모드에서 악보 내용이 바뀌면 커서를 못 봐도 저장 */
-const CURSOR_SCORE_RATIO = 0.03;
 /** 트리거 모드 최소 간격 — 2배속 연속 페이지용 */
 const TRIGGER_MIN_INTERVAL_MS = 70;
 /** 같은 악보 페이지로 보는 score fingerprint 유사도 (변화 감지 모드 전용) */
@@ -667,14 +665,15 @@ function resetCursorTrack(x = null) {
   state.cursorPendingAt = 0;
 }
 
-function maybeSaveCursorByScore(cropped, now) {
-  if (!state.lastImageData) return false;
+function armCursorIfOnRight(x, scoreWidth) {
+  if (x != null && x > scoreWidth * 0.62) state.playheadArmed = true;
+}
+
+function saveCursorPageTurn(cropped, now, x) {
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return false;
-
-  const { changeRatio } = compareImageData(state.lastImageData, cropped.imageData);
-  if (changeRatio < CURSOR_SCORE_RATIO) return false;
-
-  return saveCapture(cropped, changeRatio, now, null, "저장됨 (재생 커서 · 악보 전환)");
+  if (!saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) return false;
+  resetCursorTrack(x);
+  return true;
 }
 
 async function tickCursorMode(cropped, now) {
@@ -688,77 +687,57 @@ async function tickCursorMode(cropped, now) {
     state.prevImageData = cropped.imageData;
     state.lastSavedAt = now;
     resetCursorTrack(current.present ? current.x : null);
-    if (current.present && current.x > scoreWidth * 0.25) state.playheadArmed = true;
+    if (current.present) armCursorIfOnRight(current.x, scoreWidth);
     setMessage("첫 프레임 저장");
     return;
   }
 
-  // 커서가 잠깐 안 보여도 이전 위치를 유지. 오른쪽에서 사라진 뒤 왼쪽에 나타나면 페이지 전환.
   if (!current.present) {
-    if (
-      state.playheadArmed &&
-      state.lastPlayheadX != null &&
-      state.lastPlayheadX > scoreWidth * 0.28 &&
-      now - state.lastSavedAt >= triggerMinIntervalMs()
-    ) {
+    if (state.playheadArmed && (state.playheadPeakX ?? 0) > scoreWidth * 0.62) {
       state.cursorPendingAt = state.cursorPendingAt || now;
     }
-    maybeSaveCursorByScore(cropped, now);
     return;
   }
+
+  const x = current.x;
 
   if (
     state.cursorPendingAt &&
-    current.x < scoreWidth * 0.5 &&
-    (state.playheadPeakX ?? 0) > scoreWidth * 0.28 &&
-    now - state.cursorPendingAt < 900 &&
-    now - state.lastSavedAt >= triggerMinIntervalMs()
+    state.playheadArmed &&
+    x < scoreWidth * 0.22 &&
+    (state.playheadPeakX ?? 0) > scoreWidth * 0.62 &&
+    now - state.cursorPendingAt < 800
   ) {
-    if (saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) {
-      resetCursorTrack(current.x);
-      return;
-    }
+    saveCursorPageTurn(cropped, now, x);
+    return;
   }
   state.cursorPendingAt = 0;
 
-  const x = current.x;
   if (state.lastPlayheadX == null) {
     resetCursorTrack(x);
-    if (x > scoreWidth * 0.25) state.playheadArmed = true;
+    armCursorIfOnRight(x, scoreWidth);
     return;
   }
 
-  if (x >= state.lastPlayheadX - Math.max(3, scoreWidth * 0.006)) {
+  if (x >= state.lastPlayheadX - Math.max(4, scoreWidth * 0.01)) {
     state.playheadPeakX =
       state.playheadPeakX == null ? x : Math.max(state.playheadPeakX, x);
-    if (x > scoreWidth * 0.25) state.playheadArmed = true;
+    armCursorIfOnRight(x, scoreWidth);
     state.lastPlayheadX = x;
-    maybeSaveCursorByScore(cropped, now);
     return;
   }
 
   const peak = state.playheadPeakX ?? state.lastPlayheadX;
-  const jumpLeft = peak - x;
   const wrapped =
-    jumpLeft > scoreWidth * 0.1 &&
-    (state.playheadArmed || peak > scoreWidth * 0.28) &&
-    x < scoreWidth * 0.55;
+    state.playheadArmed &&
+    peak > scoreWidth * 0.62 &&
+    x < scoreWidth * 0.22 &&
+    peak - x > scoreWidth * 0.4;
 
   state.lastPlayheadX = x;
+  if (!wrapped) return;
 
-  if (!wrapped) {
-    maybeSaveCursorByScore(cropped, now);
-    return;
-  }
-  if (now - state.lastSavedAt < triggerMinIntervalMs()) return;
-
-  if (saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) {
-    resetCursorTrack(x);
-    if (x > scoreWidth * 0.25) state.playheadArmed = true;
-  } else {
-    state.playheadArmed = false;
-    state.playheadPeakX = x;
-  }
+  saveCursorPageTurn(cropped, now, x);
 }
 
 async function tickDiffMode(cropped, now) {
