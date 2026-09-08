@@ -1,4 +1,10 @@
-import { compareImageData, fingerprint, fingerprintsSimilar, detectPlayhead } from "./diff.js";
+import {
+  compareImageData,
+  compareMeasureInk,
+  fingerprint,
+  fingerprintsSimilar,
+  detectPlayhead
+} from "./diff.js";
 import { buildPdf, downloadBlob } from "./pdf.js";
 
 const $ = (id) => document.getElementById(id);
@@ -74,8 +80,9 @@ const state = {
   prevMeasureImageData: null,
   measureChangeStartedAt: 0,
   lastPlayheadX: null,
-  lastPlayheadPresent: false,
-  cursorChangeStartedAt: 0,
+  playheadPeakX: null,
+  playheadArmed: false,
+  cursorPendingAt: 0,
   lastSavedAt: 0,
   prevImageData: null,
   changeStartedAt: 0,
@@ -88,9 +95,11 @@ const SETTLE_RATIO = 0.015;
 /** 페이지 전환 중에도 이 시간이 지나면 강제 저장 */
 const MAX_SETTLE_WAIT_MS = 1200;
 
-/** 마디 숫자 fingerprint 유사도 (낮을수록 엄격) */
-const MEASURE_FP_SIMILAR = 0.04;
-/** 같은 악보 페이지로 보는 score fingerprint 유사도 */
+/** 마디 숫자 잉크 변화율 (슬라이더와 별개 — 숫자 한 자리 변경도 잡음) */
+const MEASURE_INK_RATIO = 0.14;
+/** 마디 숫자가 안정됐다고 볼 연속 잉크 변화율 */
+const MEASURE_SETTLE_RATIO = 0.06;
+/** 같은 악보 페이지로 보는 score fingerprint 유사도 (변화 감지 모드 전용) */
 const SCORE_DUPE_SIMILAR = 0.06;
 
 const workCanvas = document.createElement("canvas");
@@ -568,17 +577,13 @@ function addCapture(cropped) {
 
 function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = null) {
   const fp = fingerprint(cropped.imageData);
-  if (state.lastFingerprint) {
+  const allowSimilarScore = Boolean(measureCropped) || useCursorCaptureMode();
+  if (state.lastFingerprint && !allowSimilarScore) {
     if (
       state.lastFingerprint === fp ||
       fingerprintsSimilar(state.lastFingerprint, fp, SCORE_DUPE_SIMILAR)
     ) {
       state.changeStartedAt = 0;
-      if (measureCropped) {
-        state.lastMeasureImageData = measureCropped.imageData;
-        state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
-        state.prevMeasureImageData = measureCropped.imageData;
-      }
       return false;
     }
   }
@@ -604,21 +609,10 @@ function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = 
 }
 
 function measureNumberChanged(measureCropped) {
-  if (!measureCropped) return false;
-  if (!state.lastMeasureFingerprint) return true;
+  if (!measureCropped || !state.lastMeasureImageData) return false;
 
-  const measureFp = fingerprint(measureCropped.imageData);
-  if (fingerprintsSimilar(state.lastMeasureFingerprint, measureFp, MEASURE_FP_SIMILAR)) {
-    return false;
-  }
-
-  // 재생 커서 등 노이즈: 픽셀 변화율이 사용자 임계값 미만이면 무시
-  if (state.lastMeasureImageData) {
-    const { changeRatio } = compareImageData(state.lastMeasureImageData, measureCropped.imageData);
-    if (changeRatio < state.sensitivity) return false;
-  }
-
-  return true;
+  const { changeRatio } = compareMeasureInk(state.lastMeasureImageData, measureCropped.imageData);
+  return changeRatio >= MEASURE_INK_RATIO;
 }
 
 async function tickMeasureMode(cropped, measureCropped, now) {
@@ -643,102 +637,96 @@ async function tickMeasureMode(cropped, measureCropped, now) {
     return;
   }
 
-  // 마디 영역만 흔들리고 악보는 같으면 오탐 → 기준만 갱신
-  const scoreFp = fingerprint(cropped.imageData);
-  if (
-    state.lastFingerprint &&
-    fingerprintsSimilar(state.lastFingerprint, scoreFp, SCORE_DUPE_SIMILAR)
-  ) {
-    state.lastMeasureImageData = measureCropped.imageData;
-    state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
-    state.prevMeasureImageData = measureCropped.imageData;
-    state.measureChangeStartedAt = 0;
-    return;
-  }
-
   if (!state.measureChangeStartedAt) state.measureChangeStartedAt = now;
   if (now - state.lastSavedAt < state.minIntervalMs) return;
 
   const vsPrev = state.prevMeasureImageData
-    ? compareImageData(state.prevMeasureImageData, measureCropped.imageData).changeRatio
+    ? compareMeasureInk(state.prevMeasureImageData, measureCropped.imageData).changeRatio
     : 1;
   state.prevMeasureImageData = measureCropped.imageData;
 
   const waited = now - state.measureChangeStartedAt;
-  if (vsPrev > SETTLE_RATIO && waited < MAX_SETTLE_WAIT_MS) return;
+  if (vsPrev > MEASURE_SETTLE_RATIO && waited < MAX_SETTLE_WAIT_MS) return;
+
+  const measureFp = fingerprint(measureCropped.imageData);
+  if (
+    state.lastMeasureFingerprint &&
+    fingerprintsSimilar(state.lastMeasureFingerprint, measureFp, 0.02)
+  ) {
+    state.measureChangeStartedAt = 0;
+    return;
+  }
 
   saveCapture(cropped, 1, now, measureCropped);
   state.measureChangeStartedAt = 0;
 }
 
-function playheadPageTurn(last, current, scoreWidth) {
-  if (!current.present || !last.present || current.x == null || last.x == null) return false;
-
-  const jumpBack = last.x - current.x;
-  if (jumpBack > scoreWidth * 0.2) return true;
-
-  return last.x > scoreWidth * 0.65 && current.x < scoreWidth * 0.35;
-}
-
-function playheadTrigger(last, current, scoreWidth) {
-  if (!current.present) return false;
-  if (!last.present) return true;
-  return playheadPageTurn(last, current, scoreWidth);
+function resetCursorTrack(x = null) {
+  state.lastPlayheadX = x;
+  state.playheadPeakX = x;
+  state.playheadArmed = false;
+  state.cursorPendingAt = 0;
 }
 
 async function tickCursorMode(cropped, now) {
   const current = detectPlayhead(cropped.imageData);
-  const last = {
-    present: state.lastPlayheadPresent,
-    x: state.lastPlayheadX
-  };
   const scoreWidth = cropped.width;
 
-  if (state.lastPlayheadX == null) {
+  if (state.lastImageData == null) {
     addCapture(cropped);
     state.lastImageData = cropped.imageData;
     state.lastFingerprint = fingerprint(cropped.imageData);
     state.prevImageData = cropped.imageData;
-    state.lastPlayheadX = current.x;
-    state.lastPlayheadPresent = current.present;
     state.lastSavedAt = now;
-    state.changeStartedAt = 0;
-    state.cursorChangeStartedAt = 0;
+    resetCursorTrack(current.present ? current.x : null);
+    if (current.present && current.x > scoreWidth * 0.55) state.playheadArmed = true;
     setMessage("첫 프레임 저장");
     return;
   }
 
-  if (!playheadTrigger(last, current, scoreWidth)) {
-    state.cursorChangeStartedAt = 0;
-    state.lastPlayheadX = current.x;
-    state.lastPlayheadPresent = current.present;
+  // 커서가 한 프레임 안 보여도 이전 위치를 유지 — 깜빡임을 페이지 전환으로 보지 않음
+  if (!current.present) return;
+
+  const x = current.x;
+  if (state.lastPlayheadX == null) {
+    resetCursorTrack(x);
+    if (x > scoreWidth * 0.55) state.playheadArmed = true;
     return;
   }
 
-  const scoreFp = fingerprint(cropped.imageData);
-  if (
-    state.lastFingerprint &&
-    fingerprintsSimilar(state.lastFingerprint, scoreFp, SCORE_DUPE_SIMILAR)
-  ) {
-    state.lastPlayheadX = current.x;
-    state.lastPlayheadPresent = current.present;
-    state.cursorChangeStartedAt = 0;
+  if (x >= state.lastPlayheadX - Math.max(6, scoreWidth * 0.01)) {
+    state.playheadPeakX =
+      state.playheadPeakX == null ? x : Math.max(state.playheadPeakX, x);
+    if (x > scoreWidth * 0.55) state.playheadArmed = true;
+    state.lastPlayheadX = x;
+    state.cursorPendingAt = 0;
     return;
   }
 
-  if (!state.cursorChangeStartedAt) state.cursorChangeStartedAt = now;
+  const peak = state.playheadPeakX ?? state.lastPlayheadX;
+  const wrapped =
+    state.playheadArmed &&
+    x < scoreWidth * 0.3 &&
+    peak - x > scoreWidth * 0.35;
+
+  state.lastPlayheadX = x;
+
+  if (!wrapped) {
+    state.cursorPendingAt = 0;
+    return;
+  }
+
+  if (!state.cursorPendingAt) state.cursorPendingAt = now;
   if (now - state.lastSavedAt < state.minIntervalMs) return;
+  if (now - state.cursorPendingAt < 250) return;
 
-  const waited = now - state.cursorChangeStartedAt;
-  if (waited < 200) return;
-
-  if (
-    saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")
-  ) {
-    state.lastPlayheadX = current.x;
-    state.lastPlayheadPresent = current.present;
+  if (saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) {
+    resetCursorTrack(x);
+  } else {
+    state.playheadArmed = false;
+    state.playheadPeakX = x;
+    state.cursorPendingAt = 0;
   }
-  state.cursorChangeStartedAt = 0;
 }
 
 async function tickDiffMode(cropped, now) {
@@ -817,8 +805,9 @@ function startCapture() {
   state.prevMeasureImageData = null;
   state.measureChangeStartedAt = 0;
   state.lastPlayheadX = null;
-  state.lastPlayheadPresent = false;
-  state.cursorChangeStartedAt = 0;
+  state.playheadPeakX = null;
+  state.playheadArmed = false;
+  state.cursorPendingAt = 0;
   state.prevImageData = null;
   state.lastSavedAt = 0;
   state.changeStartedAt = 0;
@@ -877,8 +866,9 @@ function clearCaptures() {
   state.prevMeasureImageData = null;
   state.measureChangeStartedAt = 0;
   state.lastPlayheadX = null;
-  state.lastPlayheadPresent = false;
-  state.cursorChangeStartedAt = 0;
+  state.playheadPeakX = null;
+  state.playheadArmed = false;
+  state.cursorPendingAt = 0;
   state.prevImageData = null;
   state.changeStartedAt = 0;
   renderThumbs();

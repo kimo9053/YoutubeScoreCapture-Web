@@ -78,38 +78,101 @@ export function fingerprint(imageData, size = 16) {
   return values.join(",");
 }
 
+/** 마디 숫자처럼 작은 잉크 영역 비교. 흰 배경·빨간 커서는 제외. */
+export function compareMeasureInk(a, b) {
+  const WHITE = 228;
+  const pixelThreshold = 30;
+
+  if (!a || !b || a.width !== b.width || a.height !== b.height) {
+    return { changeRatio: 1, inkPixels: 0, changedPixels: 0 };
+  }
+
+  const da = a.data;
+  const db = b.data;
+  let ink = 0;
+  let changed = 0;
+
+  for (let i = 0; i < da.length; i += 4) {
+    const r1 = da[i];
+    const g1 = da[i + 1];
+    const b1 = da[i + 2];
+    const a1 = da[i + 3];
+    const r2 = db[i];
+    const g2 = db[i + 1];
+    const b2 = db[i + 2];
+    const a2 = db[i + 3];
+
+    if (isRedHighlight(r1, g1, b1, a1) || isRedHighlight(r2, g2, b2, a2)) continue;
+
+    const gray1 = grayOf(r1, g1, b1);
+    const gray2 = grayOf(r2, g2, b2);
+    if (gray1 >= WHITE && gray2 >= WHITE) continue;
+
+    ink += 1;
+    if (Math.abs(gray1 - gray2) >= pixelThreshold) changed += 1;
+  }
+
+  if (ink < 8) {
+    return { changeRatio: 0, inkPixels: ink, changedPixels: 0 };
+  }
+
+  return {
+    changeRatio: changed / ink,
+    inkPixels: ink,
+    changedPixels: changed
+  };
+}
+
 export function detectPlayhead(imageData) {
   const { width, height, data } = imageData;
-  let sumX = 0;
+  const cols = new Uint32Array(width);
   let count = 0;
-  let minX = width;
-  let maxX = 0;
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = (y * width + x) * 4;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const a = data[i + 3];
-      if (!isRedHighlight(r, g, b, a)) continue;
-      sumX += x;
+      if (!isRedHighlight(data[i], data[i + 1], data[i + 2], data[i + 3])) continue;
+      cols[x] += 1;
       count += 1;
-      minX = Math.min(minX, x);
-      maxX = Math.max(maxX, x);
     }
   }
 
-  if (count === 0) {
-    return { present: false, x: null, minX: null, maxX: null, width: 0, count: 0 };
+  const minCount = Math.max(12, Math.round(height * 0.06));
+  if (count < minCount) {
+    return { present: false, x: null, minX: null, maxX: null, width: 0, count };
+  }
+
+  let peakX = 0;
+  let peak = 0;
+  for (let x = 0; x < width; x += 1) {
+    if (cols[x] > peak) {
+      peak = cols[x];
+      peakX = x;
+    }
+  }
+
+  const band = Math.max(2, Math.round(width * 0.012));
+  let inBand = 0;
+  let minX = width;
+  let maxX = 0;
+  for (let x = Math.max(0, peakX - band); x <= Math.min(width - 1, peakX + band); x += 1) {
+    if (!cols[x]) continue;
+    inBand += cols[x];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+  }
+
+  // 세로 선이 아니면(퍼진 빨간 UI) 커서로 보지 않음
+  if (inBand / count < 0.42 || peak < height * 0.05) {
+    return { present: false, x: null, minX: null, maxX: null, width: 0, count };
   }
 
   return {
     present: true,
-    x: Math.round(sumX / count),
+    x: peakX,
     minX,
     maxX,
-    width: maxX - minX + 1,
+    width: Math.max(1, maxX - minX + 1),
     count
   };
 }
