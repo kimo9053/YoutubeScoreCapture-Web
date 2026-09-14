@@ -66,6 +66,7 @@ const state = {
   selectingMeasure: false,
   region: null,
   measureRegion: null,
+  regionVideoSize: null,
   measureModeEnabled: false,
   cursorModeEnabled: false,
   running: false,
@@ -170,6 +171,7 @@ function renderThumbs() {
     els.thumbs.appendChild(btn);
     if (showInsert) addInsertSlot(index + 1);
   });
+  requestAnimationFrame(syncOverlaySize);
 }
 
 function toggleSelect(id) {
@@ -307,17 +309,36 @@ function renderUi() {
   els.empty.classList.toggle("hidden", hasStream);
 }
 
-function syncOverlaySize() {
-  const rect = els.previewWrap.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  els.overlay.width = Math.max(1, Math.round(rect.width * dpr));
-  els.overlay.height = Math.max(1, Math.round(rect.height * dpr));
-  els.overlay.style.width = `${rect.width}px`;
-  els.overlay.style.height = `${rect.height}px`;
-  drawOverlay();
+function currentVideoSize() {
+  const w = els.preview.videoWidth;
+  const h = els.preview.videoHeight;
+  return w && h ? { w, h } : null;
 }
 
-function cssToVideoPoint(clientX, clientY) {
+function scaleRect(rect, from, to) {
+  if (!rect || !from || !to || !from.w || !from.h) return rect;
+  if (from.w === to.w && from.h === to.h) return rect;
+  return {
+    x: Math.round((rect.x * to.w) / from.w),
+    y: Math.round((rect.y * to.h) / from.h),
+    w: Math.max(1, Math.round((rect.w * to.w) / from.w)),
+    h: Math.max(1, Math.round((rect.h * to.h) / from.h))
+  };
+}
+
+function remapRegionsToVideo() {
+  const to = currentVideoSize();
+  if (!to) return;
+  const from = state.regionVideoSize;
+  if (from && (from.w !== to.w || from.h !== to.h)) {
+    state.region = scaleRect(state.region, from, to);
+    state.measureRegion = scaleRect(state.measureRegion, from, to);
+  }
+  state.regionVideoSize = to;
+}
+
+function getVideoLayout() {
+  remapRegionsToVideo();
   const video = els.preview;
   const wrap = els.previewWrap.getBoundingClientRect();
   const vw = video.videoWidth;
@@ -327,36 +348,48 @@ function cssToVideoPoint(clientX, clientY) {
   const scale = Math.min(wrap.width / vw, wrap.height / vh);
   const dispW = vw * scale;
   const dispH = vh * scale;
-  const offX = (wrap.width - dispW) / 2;
-  const offY = (wrap.height - dispH) / 2;
-
-  const x = (clientX - wrap.left - offX) / scale;
-  const y = (clientY - wrap.top - offY) / scale;
   return {
-    x: Math.max(0, Math.min(vw, x)),
-    y: Math.max(0, Math.min(vh, y))
+    wrap,
+    vw,
+    vh,
+    scale,
+    offX: (wrap.width - dispW) / 2,
+    offY: (wrap.height - dispH) / 2,
+    dpr: window.devicePixelRatio || 1
+  };
+}
+
+function syncOverlaySize() {
+  const rect = els.previewWrap.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(rect.width * dpr));
+  const h = Math.max(1, Math.round(rect.height * dpr));
+  if (els.overlay.width !== w) els.overlay.width = w;
+  if (els.overlay.height !== h) els.overlay.height = h;
+  els.overlay.style.width = `${rect.width}px`;
+  els.overlay.style.height = `${rect.height}px`;
+  drawOverlay();
+}
+
+function cssToVideoPoint(clientX, clientY) {
+  const layout = getVideoLayout();
+  if (!layout) return null;
+  const x = (clientX - layout.wrap.left - layout.offX) / layout.scale;
+  const y = (clientY - layout.wrap.top - layout.offY) / layout.scale;
+  return {
+    x: Math.max(0, Math.min(layout.vw, x)),
+    y: Math.max(0, Math.min(layout.vh, y))
   };
 }
 
 function videoRectToOverlay(region) {
-  const video = els.preview;
-  const wrap = els.previewWrap.getBoundingClientRect();
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  if (!vw || !vh || !region) return null;
-
-  const scale = Math.min(wrap.width / vw, wrap.height / vh);
-  const dispW = vw * scale;
-  const dispH = vh * scale;
-  const offX = (wrap.width - dispW) / 2;
-  const offY = (wrap.height - dispH) / 2;
-  const dpr = window.devicePixelRatio || 1;
-
+  const layout = getVideoLayout();
+  if (!layout || !region) return null;
   return {
-    x: (offX + region.x * scale) * dpr,
-    y: (offY + region.y * scale) * dpr,
-    w: region.w * scale * dpr,
-    h: region.h * scale * dpr
+    x: (layout.offX + region.x * layout.scale) * layout.dpr,
+    y: (layout.offY + region.y * layout.scale) * layout.dpr,
+    w: region.w * layout.scale * layout.dpr,
+    h: region.h * layout.scale * layout.dpr
   };
 }
 
@@ -424,6 +457,7 @@ async function startShare() {
     state.stream = stream;
     state.region = null;
     state.measureRegion = null;
+    state.regionVideoSize = null;
     state.measureModeEnabled = false;
     state.cursorModeEnabled = false;
     els.preview.srcObject = stream;
@@ -435,6 +469,7 @@ async function startShare() {
       els.preview.srcObject = null;
       state.region = null;
       state.measureRegion = null;
+      state.regionVideoSize = null;
       state.measureModeEnabled = false;
       state.cursorModeEnabled = false;
       setMessage("화면 공유가 종료되었습니다.");
@@ -510,6 +545,7 @@ function beginRegionSelect(mode = "main") {
       drawOverlay();
       return;
     }
+    state.regionVideoSize = currentVideoSize();
     if (mode === "measure") {
       state.measureRegion = current;
       cleanup();
@@ -571,10 +607,12 @@ function grabCropFromRegion(region, destCanvas, destCtx, { withDataUrl = false }
 }
 
 function grabCrop(options = {}) {
+  remapRegionsToVideo();
   return grabCropFromRegion(state.region, cropCanvas, cropCtx, options);
 }
 
 function grabMeasureCrop() {
+  remapRegionsToVideo();
   return grabCropFromRegion(state.measureRegion, measureCropCanvas, measureCropCtx);
 }
 
@@ -1041,7 +1079,19 @@ els.minInterval.addEventListener("input", () => {
 });
 
 window.addEventListener("resize", syncOverlaySize);
-els.preview.addEventListener("loadedmetadata", syncOverlaySize);
+els.preview.addEventListener("loadedmetadata", () => {
+  remapRegionsToVideo();
+  syncOverlaySize();
+});
+els.preview.addEventListener("resize", () => {
+  remapRegionsToVideo();
+  syncOverlaySize();
+});
+
+if (typeof ResizeObserver === "function") {
+  const previewObserver = new ResizeObserver(() => syncOverlaySize());
+  previewObserver.observe(els.previewWrap);
+}
 
 renderUi();
 
