@@ -643,33 +643,23 @@ function manualCapture(insertIndex = null) {
   setMessage(`수동 캡처를 ${pos}번 위치에 넣었습니다.`);
 }
 
-function isSameAsLastScore(cropped) {
-  if (!cropped) return false;
-  const fp = fingerprint(cropped.imageData);
-  if (state.lastFingerprint) {
-    if (
-      state.lastFingerprint === fp ||
-      fingerprintsSimilar(state.lastFingerprint, fp, 0.08)
-    ) {
-      return true;
-    }
+/** 진짜로 같은 프레임인지 (비슷한 타브 페이지는 다른 페이지로 본다) */
+function isNearlyIdenticalScore(cropped) {
+  if (!cropped || !state.lastImageData) return false;
+  if (
+    cropped.imageData.width !== state.lastImageData.width ||
+    cropped.imageData.height !== state.lastImageData.height
+  ) {
+    return false;
   }
-  if (state.lastImageData) {
-    const { changeRatio } = compareImageData(state.lastImageData, cropped.imageData);
-    if (changeRatio < 0.025) return true;
-  }
-  return false;
+  const { changeRatio } = compareImageData(state.lastImageData, cropped.imageData);
+  return changeRatio < 0.006;
 }
 
 function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = null) {
   const fp = fingerprint(cropped.imageData);
-  if (state.lastFingerprint && isSameAsLastScore(cropped)) {
+  if (state.lastImageData && isNearlyIdenticalScore(cropped)) {
     state.changeStartedAt = 0;
-    if (measureCropped) {
-      state.lastMeasureImageData = measureCropped.imageData;
-      state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
-      state.prevMeasureImageData = measureCropped.imageData;
-    }
     return false;
   }
 
@@ -733,13 +723,14 @@ async function tickMeasureMode(cropped, measureCropped, now) {
 
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return;
 
-  // 숫자가 바뀌어도 아직 이전 악보면 새 페이지가 그려질 때까지 대기
-  if (isSameAsLastScore(cropped)) {
-    if (!state.measureChangeStartedAt) state.measureChangeStartedAt = now;
-    if (now - state.measureChangeStartedAt < 900) return;
-    state.measureChangeStartedAt = 0;
-    return;
-  }
+  if (!state.measureChangeStartedAt) state.measureChangeStartedAt = now;
+  const vsPrev = state.prevMeasureImageData
+    ? compareMeasureInk(state.prevMeasureImageData, measureCropped.imageData).changeRatio
+    : 0;
+  state.prevMeasureImageData = measureCropped.imageData;
+  if (vsPrev > 0.1 && now - state.measureChangeStartedAt < 180) return;
+
+  if (isNearlyIdenticalScore(cropped) && now - state.measureChangeStartedAt < 250) return;
 
   saveCapture(cropped, 1, now, measureCropped);
   state.measureChangeStartedAt = 0;
@@ -766,7 +757,6 @@ function beginAwaitNewPage(x) {
 
 function saveCursorPageTurn(cropped, now, x) {
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return false;
-  if (isSameAsLastScore(cropped)) return false;
   if (!saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) return false;
   state.cursorAwaitingNewPage = false;
   resetCursorTrack(x);
@@ -791,14 +781,10 @@ async function tickCursorMode(cropped, now) {
   }
 
   if (state.cursorAwaitingNewPage) {
-    if (!isSameAsLastScore(cropped)) {
-      saveCursorPageTurn(cropped, now, current.present ? current.x : state.lastPlayheadX);
-      return;
-    }
-    if (now - state.cursorPendingAt > 1000) {
-      state.cursorAwaitingNewPage = false;
-      state.cursorPendingAt = 0;
-    }
+    const waited = now - state.cursorPendingAt;
+    if (waited < 140) return;
+    if (isNearlyIdenticalScore(cropped) && waited < 350) return;
+    saveCursorPageTurn(cropped, now, current.present ? current.x : state.lastPlayheadX);
     return;
   }
 
