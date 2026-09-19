@@ -99,10 +99,10 @@ const SETTLE_RATIO = 0.015;
 /** 페이지 전환 중에도 이 시간이 지나면 강제 저장 */
 const MAX_SETTLE_WAIT_MS = 1200;
 
-/** 마디 숫자 잉크 변화율 (한 자리만 바뀌어도 잡음) */
-const MEASURE_INK_RATIO = 0.02;
+/** 마디 숫자 잉크 변화율 (2배속·작은 숫자 변경도 잡음) */
+const MEASURE_INK_RATIO = 0.03;
 /** 마디 영역 전체 픽셀 변화율 (잉크가 적어도 감지) */
-const MEASURE_PIXEL_RATIO = 0.012;
+const MEASURE_PIXEL_RATIO = 0.018;
 /** 트리거 모드 최소 간격 — 2배속 연속 페이지용 */
 const TRIGGER_MIN_INTERVAL_MS = 70;
 /** 악보가 이 시간 동안 안 보이면 곡이 끝난 것으로 보고 중지 */
@@ -773,13 +773,7 @@ function isNearlyIdenticalScore(cropped) {
 
 function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = null) {
   const fp = fingerprint(cropped.imageData);
-  // 마디 숫자 모드는 숫자만 바뀌고 악보는 거의 같을 수 있음 → 유사 악보로 버리지 않음
-  if (
-    !useMeasureCaptureMode() &&
-    measureCropped == null &&
-    state.lastImageData &&
-    isNearlyIdenticalScore(cropped)
-  ) {
+  if (state.lastImageData && isNearlyIdenticalScore(cropped)) {
     state.changeStartedAt = 0;
     return false;
   }
@@ -813,24 +807,22 @@ function regionPixelsChanged(lastImage, nextCropped, inkRatio, pixelRatio) {
 }
 
 function measureNumberChanged(measureCropped, bandCropped) {
-  if (measureCropped && state.lastMeasureImageData) {
-    if (
-      measureCropped.imageData.width !== state.lastMeasureImageData.width ||
-      measureCropped.imageData.height !== state.lastMeasureImageData.height
-    ) {
-      return true;
-    }
-    const ink = compareMeasureInk(state.lastMeasureImageData, measureCropped.imageData);
-    if (ink.changeRatio >= MEASURE_INK_RATIO) return true;
-    const pixels = compareImageData(state.lastMeasureImageData, measureCropped.imageData);
-    if (pixels.changeRatio >= MEASURE_PIXEL_RATIO) return true;
-    if (state.lastMeasureFingerprint) {
-      const fp = fingerprint(measureCropped.imageData);
-      if (!fingerprintsSimilar(state.lastMeasureFingerprint, fp, 0.04)) return true;
-    }
+  const boxChanged = regionPixelsChanged(
+    state.lastMeasureImageData,
+    measureCropped,
+    MEASURE_INK_RATIO,
+    MEASURE_PIXEL_RATIO
+  );
+  if (boxChanged) return true;
+
+  if (measureCropped && state.lastMeasureFingerprint) {
+    const fp = fingerprint(measureCropped.imageData);
+    if (!fingerprintsSimilar(state.lastMeasureFingerprint, fp, 0.12)) return true;
   }
 
-  return regionPixelsChanged(state.lastMeasureBandData, bandCropped, 0.025, 0.015);
+  // 사용자가 마디 박스를 지정했으면 윗줄 띠는 보지 않음 (음표·커서 변화에 연속 저장됨)
+  if (state.measureRegion) return false;
+  return regionPixelsChanged(state.lastMeasureBandData, bandCropped, 0.035, 0.02);
 }
 
 async function tickMeasureMode(cropped, measureCropped, now, bandCropped = null) {
@@ -860,13 +852,14 @@ async function tickMeasureMode(cropped, measureCropped, now, bandCropped = null)
 
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return;
 
-  if (!state.measureChangeStartedAt) {
-    state.measureChangeStartedAt = now;
-    setMessage("마디 숫자 변화 감지… 저장 대기");
-  }
+  if (!state.measureChangeStartedAt) state.measureChangeStartedAt = now;
+  const vsPrev = state.prevMeasureImageData
+    ? compareMeasureInk(state.prevMeasureImageData, measureCropped.imageData).changeRatio
+    : 0;
+  state.prevMeasureImageData = measureCropped.imageData;
+  if (vsPrev > 0.1 && now - state.measureChangeStartedAt < 180) return;
 
-  // 페이지가 그려질 짧은 시간만 기다린 뒤, 숫자 변화가 있으면 무조건 저장
-  if (now - state.measureChangeStartedAt < 90) return;
+  if (isNearlyIdenticalScore(cropped) && now - state.measureChangeStartedAt < 250) return;
 
   if (saveCapture(cropped, 1, now, measureCropped)) {
     if (bandCropped) state.lastMeasureBandData = bandCropped.imageData;
