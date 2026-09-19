@@ -209,7 +209,7 @@ input[type="number"] {
 
 .stage {
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: minmax(0, 1fr) auto 96px;
   min-width: 0;
   min-height: 0;
 }
@@ -322,7 +322,8 @@ input[type="number"] {
   gap: 6px;
   padding: 0 16px 16px;
   overflow-x: auto;
-  min-height: 88px;
+  height: 96px;
+  min-height: 96px;
 }
 
 .thumb-insert {

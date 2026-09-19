@@ -79,6 +79,7 @@ const state = {
   lastFingerprint: null,
   lastMeasureFingerprint: null,
   lastMeasureImageData: null,
+  lastMeasureBandData: null,
   prevMeasureImageData: null,
   measureChangeStartedAt: 0,
   lastPlayheadX: null,
@@ -117,6 +118,8 @@ const cropCanvas = document.createElement("canvas");
 const cropCtx = cropCanvas.getContext("2d", { willReadFrequently: true });
 const measureCropCanvas = document.createElement("canvas");
 const measureCropCtx = measureCropCanvas.getContext("2d", { willReadFrequently: true });
+const measureBandCanvas = document.createElement("canvas");
+const measureBandCtx = measureBandCanvas.getContext("2d", { willReadFrequently: true });
 
 function setMessage(text, isError = false) {
   els.message.textContent = text || "";
@@ -171,7 +174,6 @@ function renderThumbs() {
     els.thumbs.appendChild(btn);
     if (showInsert) addInsertSlot(index + 1);
   });
-  requestAnimationFrame(syncOverlaySize);
 }
 
 function toggleSelect(id) {
@@ -315,46 +317,23 @@ function currentVideoSize() {
   return w && h ? { w, h } : null;
 }
 
-function scaleRect(rect, from, to) {
-  if (!rect || !from || !to || !from.w || !from.h) return rect;
-  if (from.w === to.w && from.h === to.h) return rect;
-  return {
-    x: Math.round((rect.x * to.w) / from.w),
-    y: Math.round((rect.y * to.h) / from.h),
-    w: Math.max(1, Math.round((rect.w * to.w) / from.w)),
-    h: Math.max(1, Math.round((rect.h * to.h) / from.h))
-  };
-}
-
-function remapRegionsToVideo() {
-  const to = currentVideoSize();
-  if (!to) return;
-  const from = state.regionVideoSize;
-  if (from && (from.w !== to.w || from.h !== to.h)) {
-    state.region = scaleRect(state.region, from, to);
-    state.measureRegion = scaleRect(state.measureRegion, from, to);
-  }
-  state.regionVideoSize = to;
-}
-
 function getVideoLayout() {
-  remapRegionsToVideo();
   const video = els.preview;
-  const wrap = els.previewWrap.getBoundingClientRect();
+  const box = video.getBoundingClientRect();
   const vw = video.videoWidth;
   const vh = video.videoHeight;
-  if (!vw || !vh) return null;
+  if (!vw || !vh || !box.width || !box.height) return null;
 
-  const scale = Math.min(wrap.width / vw, wrap.height / vh);
+  const scale = Math.min(box.width / vw, box.height / vh);
   const dispW = vw * scale;
   const dispH = vh * scale;
   return {
-    wrap,
+    wrap: box,
     vw,
     vh,
     scale,
-    offX: (wrap.width - dispW) / 2,
-    offY: (wrap.height - dispH) / 2,
+    offX: (box.width - dispW) / 2,
+    offY: (box.height - dispH) / 2,
     dpr: window.devicePixelRatio || 1
   };
 }
@@ -415,6 +394,16 @@ function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
   if (measureRect) {
     ctx.strokeStyle = "#42a5f5";
     ctx.strokeRect(measureRect.x, measureRect.y, measureRect.w, measureRect.h);
+  }
+
+  const bandRect = !tempRegion && state.measureModeEnabled ? videoRectToOverlay(scoreMeasureBand()) : null;
+  if (bandRect) {
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = "rgba(66, 165, 245, 0.85)";
+    ctx.lineWidth = Math.max(1, lineWidth - 1);
+    ctx.strokeRect(bandRect.x, bandRect.y, bandRect.w, bandRect.h);
+    ctx.restore();
   }
 }
 
@@ -607,13 +596,39 @@ function grabCropFromRegion(region, destCanvas, destCtx, { withDataUrl = false }
 }
 
 function grabCrop(options = {}) {
-  remapRegionsToVideo();
   return grabCropFromRegion(state.region, cropCanvas, cropCtx, options);
 }
 
+function expandRegion(region, pad) {
+  if (!region) return null;
+  return {
+    x: region.x - pad.left,
+    y: region.y - pad.top,
+    w: region.w + pad.left + pad.right,
+    h: region.h + pad.top + pad.bottom
+  };
+}
+
+/** 악보 윗줄 — 유튜브 타브의 14/15/16 같은 마디 숫자가 있는 띠 */
+function scoreMeasureBand() {
+  if (!state.region) return null;
+  return {
+    x: state.region.x,
+    y: state.region.y,
+    w: state.region.w,
+    h: Math.max(22, Math.round(state.region.h * 0.34))
+  };
+}
+
 function grabMeasureCrop() {
-  remapRegionsToVideo();
-  return grabCropFromRegion(state.measureRegion, measureCropCanvas, measureCropCtx);
+  const padded = state.measureRegion
+    ? expandRegion(state.measureRegion, { top: 22, left: 30, right: 12, bottom: 8 })
+    : null;
+  return grabCropFromRegion(padded || scoreMeasureBand(), measureCropCanvas, measureCropCtx);
+}
+
+function grabMeasureBand() {
+  return grabCropFromRegion(scoreMeasureBand(), measureBandCanvas, measureBandCtx);
 }
 
 function ensureDataUrl(cropped) {
@@ -721,31 +736,43 @@ function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = 
   return true;
 }
 
-function measureNumberChanged(measureCropped) {
-  if (!measureCropped || !state.lastMeasureImageData) return false;
-
-  const ink = compareMeasureInk(state.lastMeasureImageData, measureCropped.imageData);
-  if (ink.changeRatio >= MEASURE_INK_RATIO) return true;
-
-  const pixels = compareImageData(state.lastMeasureImageData, measureCropped.imageData);
-  if (pixels.changeRatio >= MEASURE_PIXEL_RATIO) return true;
-
-  const fp = fingerprint(measureCropped.imageData);
-  if (state.lastMeasureFingerprint && !fingerprintsSimilar(state.lastMeasureFingerprint, fp, 0.12)) {
-    return true;
-  }
-  return false;
+function regionPixelsChanged(lastImage, nextCropped, inkRatio, pixelRatio) {
+  if (!nextCropped || !lastImage) return false;
+  const ink = compareMeasureInk(lastImage, nextCropped.imageData);
+  if (ink.changeRatio >= inkRatio) return true;
+  const pixels = compareImageData(lastImage, nextCropped.imageData);
+  return pixels.changeRatio >= pixelRatio;
 }
 
-async function tickMeasureMode(cropped, measureCropped, now) {
-  if (!state.lastMeasureImageData) {
+function measureNumberChanged(measureCropped, bandCropped) {
+  const boxChanged = regionPixelsChanged(
+    state.lastMeasureImageData,
+    measureCropped,
+    MEASURE_INK_RATIO,
+    MEASURE_PIXEL_RATIO
+  );
+  if (boxChanged) return true;
+
+  if (measureCropped && state.lastMeasureFingerprint) {
+    const fp = fingerprint(measureCropped.imageData);
+    if (!fingerprintsSimilar(state.lastMeasureFingerprint, fp, 0.12)) return true;
+  }
+
+  return regionPixelsChanged(state.lastMeasureBandData, bandCropped, 0.035, 0.02);
+}
+
+async function tickMeasureMode(cropped, measureCropped, now, bandCropped = null) {
+  if (!state.lastMeasureImageData && !state.lastMeasureBandData) {
     addCapture(cropped);
     state.lastImageData = cropped.imageData;
     state.lastFingerprint = fingerprint(cropped.imageData);
     state.prevImageData = cropped.imageData;
-    state.lastMeasureImageData = measureCropped.imageData;
-    state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
-    state.prevMeasureImageData = measureCropped.imageData;
+    if (measureCropped) {
+      state.lastMeasureImageData = measureCropped.imageData;
+      state.lastMeasureFingerprint = fingerprint(measureCropped.imageData);
+      state.prevMeasureImageData = measureCropped.imageData;
+    }
+    if (bandCropped) state.lastMeasureBandData = bandCropped.imageData;
     state.lastSavedAt = now;
     state.changeStartedAt = 0;
     state.measureChangeStartedAt = 0;
@@ -753,9 +780,9 @@ async function tickMeasureMode(cropped, measureCropped, now) {
     return;
   }
 
-  if (!measureNumberChanged(measureCropped)) {
+  if (!measureNumberChanged(measureCropped, bandCropped)) {
     state.measureChangeStartedAt = 0;
-    state.prevMeasureImageData = measureCropped.imageData;
+    if (measureCropped) state.prevMeasureImageData = measureCropped.imageData;
     return;
   }
 
@@ -770,7 +797,9 @@ async function tickMeasureMode(cropped, measureCropped, now) {
 
   if (isNearlyIdenticalScore(cropped) && now - state.measureChangeStartedAt < 250) return;
 
-  saveCapture(cropped, 1, now, measureCropped);
+  if (saveCapture(cropped, 1, now, measureCropped)) {
+    if (bandCropped) state.lastMeasureBandData = bandCropped.imageData;
+  }
   state.measureChangeStartedAt = 0;
 }
 
@@ -919,8 +948,9 @@ async function tick() {
     const now = Date.now();
     if (useMeasureCaptureMode()) {
       const measureCropped = grabMeasureCrop();
-      if (!measureCropped) return;
-      await tickMeasureMode(cropped, measureCropped, now);
+      const bandCropped = grabMeasureBand();
+      if (!measureCropped && !bandCropped) return;
+      await tickMeasureMode(cropped, measureCropped, now, bandCropped);
       return;
     }
 
@@ -947,6 +977,7 @@ function startCapture() {
   state.lastFingerprint = null;
   state.lastMeasureImageData = null;
   state.lastMeasureFingerprint = null;
+  state.lastMeasureBandData = null;
   state.prevMeasureImageData = null;
   state.measureChangeStartedAt = 0;
   state.lastPlayheadX = null;
@@ -1012,6 +1043,7 @@ function clearCaptures() {
   state.lastFingerprint = null;
   state.lastMeasureImageData = null;
   state.lastMeasureFingerprint = null;
+  state.lastMeasureBandData = null;
   state.prevMeasureImageData = null;
   state.measureChangeStartedAt = 0;
   state.lastPlayheadX = null;
@@ -1079,14 +1111,8 @@ els.minInterval.addEventListener("input", () => {
 });
 
 window.addEventListener("resize", syncOverlaySize);
-els.preview.addEventListener("loadedmetadata", () => {
-  remapRegionsToVideo();
-  syncOverlaySize();
-});
-els.preview.addEventListener("resize", () => {
-  remapRegionsToVideo();
-  syncOverlaySize();
-});
+els.preview.addEventListener("loadedmetadata", syncOverlaySize);
+els.preview.addEventListener("resize", syncOverlaySize);
 
 if (typeof ResizeObserver === "function") {
   const previewObserver = new ResizeObserver(() => syncOverlaySize());
