@@ -84,10 +84,10 @@ export function fingerprint(imageData, size = 16) {
   return values.join(",");
 }
 
-/** 마디 숫자처럼 작은 잉크 영역 비교. 흰 배경·빨간 커서는 제외. */
+/** 마디 숫자처럼 작은 잉크 영역 비교. 흰 배경만 제외(빨간 숫자도 감지). */
 export function compareMeasureInk(a, b) {
-  const WHITE = 228;
-  const pixelThreshold = 30;
+  const WHITE = 232;
+  const pixelThreshold = 22;
 
   if (!a || !b || a.width !== b.width || a.height !== b.height) {
     return { changeRatio: 1, inkPixels: 0, changedPixels: 0 };
@@ -97,35 +97,34 @@ export function compareMeasureInk(a, b) {
   const db = b.data;
   let ink = 0;
   let changed = 0;
+  let compared = 0;
+  let rawChanged = 0;
 
   for (let i = 0; i < da.length; i += 4) {
-    const r1 = da[i];
-    const g1 = da[i + 1];
-    const b1 = da[i + 2];
-    const a1 = da[i + 3];
-    const r2 = db[i];
-    const g2 = db[i + 1];
-    const b2 = db[i + 2];
-    const a2 = db[i + 3];
+    const gray1 = grayOf(da[i], da[i + 1], da[i + 2]);
+    const gray2 = grayOf(db[i], db[i + 1], db[i + 2]);
+    compared += 1;
+    const delta = Math.abs(gray1 - gray2);
+    if (delta >= pixelThreshold) rawChanged += 1;
 
-    if (isRedHighlight(r1, g1, b1, a1) || isRedHighlight(r2, g2, b2, a2)) continue;
-
-    const gray1 = grayOf(r1, g1, b1);
-    const gray2 = grayOf(r2, g2, b2);
     if (gray1 >= WHITE && gray2 >= WHITE) continue;
 
     ink += 1;
-    if (Math.abs(gray1 - gray2) >= pixelThreshold) changed += 1;
+    if (delta >= pixelThreshold) changed += 1;
   }
 
-  if (ink < 8) {
-    return { changeRatio: 0, inkPixels: ink, changedPixels: 0 };
+  if (ink >= 6) {
+    return {
+      changeRatio: changed / ink,
+      inkPixels: ink,
+      changedPixels: changed
+    };
   }
 
   return {
-    changeRatio: changed / ink,
+    changeRatio: compared ? rawChanged / compared : 0,
     inkPixels: ink,
-    changedPixels: changed
+    changedPixels: rawChanged
   };
 }
 
