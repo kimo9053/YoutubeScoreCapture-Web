@@ -23,7 +23,6 @@ const els = {
   btnDeleteSelected: $("btnDeleteSelected"),
   btnSelectAll: $("btnSelectAll"),
   btnSelectNone: $("btnSelectNone"),
-  btnInstall: $("btnInstall"),
   sensitivity: $("sensitivity"),
   sensitivityValue: $("sensitivityValue"),
   minInterval: $("minInterval"),
@@ -35,7 +34,6 @@ const els = {
   statusDot: $("statusDot"),
   statusText: $("statusText"),
   message: $("message"),
-  installHint: $("installHint"),
   preview: $("preview"),
   overlay: $("overlay"),
   empty: $("empty"),
@@ -43,7 +41,6 @@ const els = {
   previewWrap: $("previewWrap")
 };
 
-let deferredInstallPrompt = null;
 let nextCaptureId = 1;
 
 function detectPlatform() {
@@ -1131,49 +1128,19 @@ if (!hasDisplayMedia) {
         ? `아이폰·아이패드에서는 웹 화면 공유가 지원되지 않습니다.<br><br>PC Chrome/Edge에서 아래 주소로 접속해 주세요.<br><strong>${siteUrl}</strong>`
         : "이 브라우저는 화면 공유를 지원하지 않습니다. PC Chrome/Edge로 접속해 주세요.";
   }
-  if (els.installHint) {
-    els.installHint.textContent = platform.isMobile
-      ? "모바일에서는 홈 화면 추가만 가능하고, 악보 캡처는 PC 전용입니다."
-      : els.installHint.textContent;
-  }
 } else if (!window.isSecureContext) {
   setMessage(
-    "화면 공유·PWA는 localhost(또는 https)에서만 동작합니다. start.bat으로 실행하세요.",
+    "화면 공유는 localhost(또는 https)에서만 동작합니다. start.bat으로 실행하세요.",
     true
   );
 }
 
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./sw.js").catch((err) => {
-      console.warn("SW register failed", err);
-    });
+  navigator.serviceWorker.getRegistrations().then((regs) => {
+    regs.forEach((reg) => reg.unregister());
   });
 }
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
-  deferredInstallPrompt = event;
-  if (els.btnInstall) els.btnInstall.hidden = false;
-  if (els.installHint) {
-    els.installHint.textContent = "설치 가능: 아래 ‘앱으로 설치’를 누르세요.";
-  }
-});
-
-window.addEventListener("appinstalled", () => {
-  deferredInstallPrompt = null;
-  if (els.btnInstall) els.btnInstall.hidden = true;
-  if (els.installHint) els.installHint.textContent = "홈 화면에 설치되었습니다.";
-  setMessage("앱으로 설치되었습니다.");
-});
-
-els.btnInstall?.addEventListener("click", async () => {
-  if (!deferredInstallPrompt) {
-    setMessage("이 브라우저는 자동 설치를 지원하지 않습니다. 메뉴에서 홈 화면에 추가하세요.");
-    return;
-  }
-  deferredInstallPrompt.prompt();
-  await deferredInstallPrompt.userChoice;
-  deferredInstallPrompt = null;
-  els.btnInstall.hidden = true;
 });
