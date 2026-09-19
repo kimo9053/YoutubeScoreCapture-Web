@@ -314,62 +314,89 @@ function currentVideoSize() {
   return w && h ? { w, h } : null;
 }
 
-function getVideoLayout() {
+/** 미리보기에 실제로 그려진 영상 칸. 오버레이를 이 칸에 고정한다. */
+function getVideoContentBox() {
   const video = els.preview;
-  const overlay = els.overlay.getBoundingClientRect();
-  const vbox = video.getBoundingClientRect();
   const vw = video.videoWidth;
   const vh = video.videoHeight;
-  if (!vw || !vh || !vbox.width || !vbox.height) return null;
+  if (!vw || !vh) return null;
+
+  const vbox = video.getBoundingClientRect();
+  if (!vbox.width || !vbox.height) return null;
 
   const scale = Math.min(vbox.width / vw, vbox.height / vh);
   const dispW = vw * scale;
   const dispH = vh * scale;
-  const contentLeft = vbox.left + (vbox.width - dispW) / 2;
-  const contentTop = vbox.top + (vbox.height - dispH) / 2;
+  const padX = (vbox.width - dispW) / 2;
+  const padY = (vbox.height - dispH) / 2;
+  const left = vbox.left + padX;
+  const top = vbox.top + padY;
+  const wrap = els.previewWrap.getBoundingClientRect();
+  const wrapStyle = getComputedStyle(els.previewWrap);
+  const borderLeft = parseFloat(wrapStyle.borderLeftWidth) || 0;
+  const borderTop = parseFloat(wrapStyle.borderTopWidth) || 0;
   return {
     vw,
     vh,
     scale,
-    contentLeft,
-    contentTop,
-    originX: contentLeft - overlay.left,
-    originY: contentTop - overlay.top,
-    dpr: window.devicePixelRatio || 1
+    dispW,
+    dispH,
+    left,
+    top,
+    offsetX: left - wrap.left - borderLeft,
+    offsetY: top - wrap.top - borderTop
   };
 }
 
-function syncOverlaySize() {
-  els.overlay.style.width = "100%";
-  els.overlay.style.height = "100%";
-  const rect = els.overlay.getBoundingClientRect();
+function pinOverlayToVideo() {
+  const box = getVideoContentBox();
+  const overlay = els.overlay;
+  if (!box) return null;
+
+  const left = `${box.offsetX}px`;
+  const top = `${box.offsetY}px`;
+  const width = `${box.dispW}px`;
+  const height = `${box.dispH}px`;
+  if (overlay.style.left !== left) overlay.style.left = left;
+  if (overlay.style.top !== top) overlay.style.top = top;
+  if (overlay.style.width !== width) overlay.style.width = width;
+  if (overlay.style.height !== height) overlay.style.height = height;
+
   const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(1, Math.round(rect.width * dpr));
-  const h = Math.max(1, Math.round(rect.height * dpr));
-  if (els.overlay.width !== w) els.overlay.width = w;
-  if (els.overlay.height !== h) els.overlay.height = h;
+  const cw = Math.max(1, Math.round(box.dispW * dpr));
+  const ch = Math.max(1, Math.round(box.dispH * dpr));
+  if (overlay.width !== cw) overlay.width = cw;
+  if (overlay.height !== ch) overlay.height = ch;
+  return box;
+}
+
+function syncOverlaySize() {
+  pinOverlayToVideo();
   drawOverlay();
 }
 
 function cssToVideoPoint(clientX, clientY) {
-  const layout = getVideoLayout();
-  if (!layout) return null;
-  const x = (clientX - layout.contentLeft) / layout.scale;
-  const y = (clientY - layout.contentTop) / layout.scale;
+  const box = getVideoContentBox();
+  if (!box) return null;
+  const x = (clientX - box.left) / box.scale;
+  const y = (clientY - box.top) / box.scale;
   return {
-    x: Math.max(0, Math.min(layout.vw, x)),
-    y: Math.max(0, Math.min(layout.vh, y))
+    x: Math.max(0, Math.min(box.vw, x)),
+    y: Math.max(0, Math.min(box.vh, y))
   };
 }
 
 function videoRectToOverlay(region) {
-  const layout = getVideoLayout();
-  if (!layout || !region) return null;
+  const vw = els.preview.videoWidth;
+  const vh = els.preview.videoHeight;
+  if (!region || !vw || !vh || !els.overlay.width || !els.overlay.height) return null;
+  const sx = els.overlay.width / vw;
+  const sy = els.overlay.height / vh;
   return {
-    x: (layout.originX + region.x * layout.scale) * layout.dpr,
-    y: (layout.originY + region.y * layout.scale) * layout.dpr,
-    w: region.w * layout.scale * layout.dpr,
-    h: region.h * layout.scale * layout.dpr
+    x: region.x * sx,
+    y: region.y * sy,
+    w: region.w * sx,
+    h: region.h * sy
   };
 }
 
@@ -393,8 +420,23 @@ function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
 
   const measureRect = videoRectToOverlay(measureRegion);
   if (measureRect) {
-    ctx.strokeStyle = "#42a5f5";
+    ctx.fillStyle = "rgba(255, 152, 0, 0.18)";
+    ctx.fillRect(measureRect.x, measureRect.y, measureRect.w, measureRect.h);
+    ctx.strokeStyle = "#ff9800";
     ctx.strokeRect(measureRect.x, measureRect.y, measureRect.w, measureRect.h);
+
+    const label = "마디";
+    const dpr = window.devicePixelRatio || 1;
+    ctx.font = `600 ${Math.max(11, 12 * dpr)}px "Segoe UI", system-ui, sans-serif`;
+    const pad = 4 * dpr;
+    const tw = ctx.measureText(label).width;
+    const th = 14 * dpr;
+    const lx = measureRect.x;
+    const ly = Math.max(0, measureRect.y - th - 2 * dpr);
+    ctx.fillStyle = "#ff9800";
+    ctx.fillRect(lx, ly, tw + pad * 2, th);
+    ctx.fillStyle = "#111";
+    ctx.fillText(label, lx + pad, ly + th - 3 * dpr);
   }
 }
 
@@ -456,6 +498,10 @@ async function startShare() {
     state.cursorModeEnabled = false;
     els.preview.srcObject = stream;
     await els.preview.play();
+    requestAnimationFrame(() => {
+      syncOverlaySize();
+      requestAnimationFrame(syncOverlaySize);
+    });
 
     stream.getVideoTracks()[0].addEventListener("ended", () => {
       stopCapture();
@@ -486,6 +532,7 @@ function beginRegionSelect(mode = "main") {
     setMessage("먼저 악보 영역을 지정해 주세요.", true);
     return;
   }
+  syncOverlaySize();
 
   state.selecting = mode === "main";
   state.selectingMeasure = mode === "measure";
@@ -605,16 +652,6 @@ function grabCrop(options = {}) {
   return grabCropFromRegion(state.region, cropCanvas, cropCtx, options);
 }
 
-function expandRegion(region, pad) {
-  if (!region) return null;
-  return {
-    x: region.x - pad.left,
-    y: region.y - pad.top,
-    w: region.w + pad.left + pad.right,
-    h: region.h + pad.top + pad.bottom
-  };
-}
-
 /** 악보 윗줄 — 유튜브 타브의 14/15/16 같은 마디 숫자가 있는 띠 */
 function scoreMeasureBand() {
   if (!state.region) return null;
@@ -627,10 +664,11 @@ function scoreMeasureBand() {
 }
 
 function grabMeasureCrop() {
-  const source = state.measureRegion
-    ? expandRegion(state.measureRegion, { top: 2, left: 2, right: 2, bottom: 2 })
-    : null;
-  return grabCropFromRegion(source || scoreMeasureBand(), measureCropCanvas, measureCropCtx);
+  return grabCropFromRegion(
+    state.measureRegion || scoreMeasureBand(),
+    measureCropCanvas,
+    measureCropCtx
+  );
 }
 
 function grabMeasureBand() {
@@ -957,6 +995,8 @@ async function tick() {
   if (!state.running || state.capturing) return;
   state.capturing = true;
   try {
+    pinOverlayToVideo();
+    drawOverlay();
     const cropped = grabCrop();
     if (!cropped) return;
 
@@ -1132,6 +1172,7 @@ els.preview.addEventListener("resize", syncOverlaySize);
 if (typeof ResizeObserver === "function") {
   const previewObserver = new ResizeObserver(() => syncOverlaySize());
   previewObserver.observe(els.previewWrap);
+  previewObserver.observe(els.preview);
 }
 
 renderUi();
