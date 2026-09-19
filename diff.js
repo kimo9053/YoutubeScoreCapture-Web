@@ -63,6 +63,32 @@ export function compareImageData(a, b, options = {}) {
   };
 }
 
+/** 유튜브 공식 악보처럼 흰 용지+검은 줄이 아직 보이는지 */
+export function analyzeScorePresence(imageData) {
+  if (!imageData || !imageData.data || !imageData.width) {
+    return { present: false, lightRatio: 0, inkRatio: 0 };
+  }
+
+  const data = imageData.data;
+  let light = 0;
+  let ink = 0;
+  const total = data.length / 4;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = grayOf(data[i], data[i + 1], data[i + 2]);
+    if (gray >= 214) light += 1;
+    else if (gray <= 96) ink += 1;
+  }
+
+  const lightRatio = total ? light / total : 0;
+  const inkRatio = total ? ink / total : 0;
+  return {
+    present: lightRatio >= 0.3 && inkRatio >= 0.003,
+    lightRatio,
+    inkRatio
+  };
+}
+
 export function fingerprint(imageData, size = 16) {
   const { width, height, data } = imageData;
   const values = [];

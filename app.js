@@ -1,4 +1,5 @@
 import {
+  analyzeScorePresence,
   compareImageData,
   compareMeasureInk,
   fingerprint,
@@ -85,6 +86,8 @@ const state = {
   cursorPendingAt: 0,
   cursorAwaitingNewPage: false,
   lastSavedAt: 0,
+  scoreSeen: false,
+  scoreMissingSince: 0,
   prevImageData: null,
   changeStartedAt: 0,
   captures: [],
@@ -102,6 +105,8 @@ const MEASURE_INK_RATIO = 0.02;
 const MEASURE_PIXEL_RATIO = 0.012;
 /** 트리거 모드 최소 간격 — 2배속 연속 페이지용 */
 const TRIGGER_MIN_INTERVAL_MS = 70;
+/** 악보가 이 시간 동안 안 보이면 곡이 끝난 것으로 보고 중지 */
+const SCORE_GONE_MS = 1100;
 /** 같은 악보 페이지로 보는 score fingerprint 유사도 (변화 감지 모드 전용) */
 const SCORE_DUPE_SIMILAR = 0.06;
 
@@ -740,6 +745,19 @@ function manualCapture(insertIndex = null) {
   setMessage(`수동 캡처를 ${pos}번 위치에 넣었습니다.`);
 }
 
+function shouldStopBecauseScoreGone(cropped, now) {
+  const presence = analyzeScorePresence(cropped.imageData);
+  if (presence.present) {
+    state.scoreSeen = true;
+    state.scoreMissingSince = 0;
+    return false;
+  }
+
+  if (!state.scoreSeen) return false;
+  if (!state.scoreMissingSince) state.scoreMissingSince = now;
+  return now - state.scoreMissingSince >= SCORE_GONE_MS;
+}
+
 /** 진짜로 같은 프레임인지 (비슷한 타브 페이지는 다른 페이지로 본다) */
 function isNearlyIdenticalScore(cropped) {
   if (!cropped || !state.lastImageData) return false;
@@ -1001,6 +1019,13 @@ async function tick() {
     if (!cropped) return;
 
     const now = Date.now();
+    if (shouldStopBecauseScoreGone(cropped, now)) {
+      stopCapture();
+      setMessage("악보가 사라져 캡처를 멈췄습니다. PDF를 만들 수 있습니다.");
+      return;
+    }
+    if (state.scoreSeen && state.scoreMissingSince) return;
+
     if (useMeasureCaptureMode()) {
       const measureCropped = grabMeasureCrop();
       const bandCropped = grabMeasureBand();
@@ -1042,6 +1067,8 @@ function startCapture() {
   state.cursorAwaitingNewPage = false;
   state.prevImageData = null;
   state.lastSavedAt = 0;
+  state.scoreSeen = false;
+  state.scoreMissingSince = 0;
   state.changeStartedAt = 0;
   state.timerId = setInterval(tick, 50);
   tick();
@@ -1083,6 +1110,7 @@ function toggleCursorMode() {
 function stopCapture() {
   state.running = false;
   state.cursorAwaitingNewPage = false;
+  state.scoreMissingSince = 0;
   if (state.timerId) {
     clearInterval(state.timerId);
     state.timerId = null;
@@ -1106,6 +1134,8 @@ function clearCaptures() {
   state.playheadArmed = false;
   state.cursorPendingAt = 0;
   state.cursorAwaitingNewPage = false;
+  state.scoreSeen = false;
+  state.scoreMissingSince = 0;
   state.prevImageData = null;
   state.changeStartedAt = 0;
   renderThumbs();
