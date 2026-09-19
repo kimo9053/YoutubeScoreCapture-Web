@@ -63,6 +63,7 @@ const state = {
   selectingMeasure: false,
   region: null,
   measureRegion: null,
+  measureOffset: null,
   regionVideoSize: null,
   measureModeEnabled: false,
   cursorModeEnabled: false,
@@ -314,9 +315,13 @@ function currentVideoSize() {
   return w && h ? { w, h } : null;
 }
 
+function getOverlayBox() {
+  return els.overlay.getBoundingClientRect();
+}
+
 function getVideoLayout() {
   const video = els.preview;
-  const box = video.getBoundingClientRect();
+  const box = getOverlayBox();
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   if (!vw || !vh || !box.width || !box.height) return null;
@@ -336,14 +341,14 @@ function getVideoLayout() {
 }
 
 function syncOverlaySize() {
-  const rect = els.previewWrap.getBoundingClientRect();
+  els.overlay.style.width = "100%";
+  els.overlay.style.height = "100%";
+  const rect = getOverlayBox();
   const dpr = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(rect.width * dpr));
   const h = Math.max(1, Math.round(rect.height * dpr));
   if (els.overlay.width !== w) els.overlay.width = w;
   if (els.overlay.height !== h) els.overlay.height = h;
-  els.overlay.style.width = `${rect.width}px`;
-  els.overlay.style.height = `${rect.height}px`;
   drawOverlay();
 }
 
@@ -369,12 +374,38 @@ function videoRectToOverlay(region) {
   };
 }
 
+function getMeasureRegion() {
+  if (state.measureOffset && state.region) {
+    return {
+      x: state.region.x + state.measureOffset.x,
+      y: state.region.y + state.measureOffset.y,
+      w: state.measureOffset.w,
+      h: state.measureOffset.h
+    };
+  }
+  return state.measureRegion;
+}
+
+function setMeasureRegion(abs) {
+  state.measureRegion = abs;
+  if (abs && state.region) {
+    state.measureOffset = {
+      x: abs.x - state.region.x,
+      y: abs.y - state.region.y,
+      w: abs.w,
+      h: abs.h
+    };
+  } else {
+    state.measureOffset = null;
+  }
+}
+
 function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
   const ctx = els.overlay.getContext("2d");
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
 
   const mainRegion = tempRegion || state.region;
-  const measureRegion = tempMeasureRegion ?? (tempRegion ? null : state.measureRegion);
+  const measureRegion = tempMeasureRegion ?? (tempRegion ? null : getMeasureRegion());
   const mainRect = videoRectToOverlay(mainRegion);
   if (!mainRect) return;
 
@@ -396,10 +427,10 @@ function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
   const bandRect = !tempRegion && state.measureModeEnabled ? videoRectToOverlay(scoreMeasureBand()) : null;
   if (bandRect) {
     ctx.save();
-    ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = "rgba(66, 165, 245, 0.85)";
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = "rgba(66, 165, 245, 0.7)";
     ctx.lineWidth = Math.max(1, lineWidth - 1);
-    ctx.strokeRect(bandRect.x, bandRect.y, bandRect.w, bandRect.h);
+    ctx.strokeRect(bandRect.x, bandRect.y, bandRect.w, Math.min(bandRect.h, lineWidth * 14));
     ctx.restore();
   }
 }
@@ -443,6 +474,7 @@ async function startShare() {
     state.stream = stream;
     state.region = null;
     state.measureRegion = null;
+    state.measureOffset = null;
     state.regionVideoSize = null;
     state.measureModeEnabled = false;
     state.cursorModeEnabled = false;
@@ -455,6 +487,7 @@ async function startShare() {
       els.preview.srcObject = null;
       state.region = null;
       state.measureRegion = null;
+      state.measureOffset = null;
       state.regionVideoSize = null;
       state.measureModeEnabled = false;
       state.cursorModeEnabled = false;
@@ -533,12 +566,13 @@ function beginRegionSelect(mode = "main") {
     }
     state.regionVideoSize = currentVideoSize();
     if (mode === "measure") {
-      state.measureRegion = current;
+      setMeasureRegion(current);
       cleanup();
       setMessage(`마디 숫자 영역 지정됨 (${current.w}×${current.h}). '마디 숫자 우선 캡처'를 켜세요.`);
     } else {
       state.region = current;
       state.measureRegion = null;
+      state.measureOffset = null;
       state.measureModeEnabled = false;
       state.cursorModeEnabled = false;
       cleanup();
@@ -613,13 +647,14 @@ function scoreMeasureBand() {
     x: state.region.x,
     y: state.region.y,
     w: state.region.w,
-    h: Math.max(22, Math.round(state.region.h * 0.34))
+    h: Math.max(20, Math.round(state.region.h * 0.22))
   };
 }
 
 function grabMeasureCrop() {
-  const padded = state.measureRegion
-    ? expandRegion(state.measureRegion, { top: 22, left: 30, right: 12, bottom: 8 })
+  const source = getMeasureRegion();
+  const padded = source
+    ? expandRegion(source, { top: 22, left: 30, right: 12, bottom: 8 })
     : null;
   return grabCropFromRegion(padded || scoreMeasureBand(), measureCropCanvas, measureCropCtx);
 }
