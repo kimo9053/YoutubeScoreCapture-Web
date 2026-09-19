@@ -465,11 +465,25 @@ async function startShare() {
     if (!platform.isMobile) {
       displayMediaOptions.preferCurrentTab = false;
       displayMediaOptions.selfBrowserSurface = "exclude";
-      displayMediaOptions.surfaceSwitching = "include";
+      displayMediaOptions.surfaceSwitching = "exclude";
       displayMediaOptions.systemAudio = "exclude";
     }
 
+    let captureController = null;
+    if (typeof CaptureController === "function") {
+      captureController = new CaptureController();
+      displayMediaOptions.controller = captureController;
+    }
+
     const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+
+    try {
+      captureController?.setFocusBehavior("focus-capturing-application");
+    } catch (_error) {
+      // 일부 브라우저/공유 대상에서는 포커스 제어를 지원하지 않음
+    }
+    window.focus();
+    requestAnimationFrame(() => window.focus());
 
     state.stream = stream;
     state.region = null;
