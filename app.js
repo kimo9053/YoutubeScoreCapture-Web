@@ -287,7 +287,9 @@ function renderUi() {
     ? measureModeOn
       ? "캡처 중 (마디 숫자)"
       : cursorModeOn
-        ? "캡처 중 (재생 커서)"
+        ? state.lastPlayheadX != null
+          ? "캡처 중 (재생 커서 · 감지됨)"
+          : "캡처 중 (재생 커서 · 찾는 중)"
         : "캡처 중"
     : hasRegion && measureModeOn
       ? "준비됨 (마디 숫자 모드)"
@@ -445,6 +447,17 @@ function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
     ctx.fillRect(lx, ly, tw + pad * 2, th);
     ctx.fillStyle = "#111";
     ctx.fillText(label, lx + pad, ly + th - 3 * dpr);
+  }
+
+  if (useCursorCaptureMode() && state.lastPlayheadX != null && mainRect) {
+    const dpr = window.devicePixelRatio || 1;
+    const px = mainRect.x + (state.lastPlayheadX / Math.max(1, state.region.w)) * mainRect.w;
+    ctx.strokeStyle = "#00e5ff";
+    ctx.lineWidth = Math.max(2, dpr * 2);
+    ctx.beginPath();
+    ctx.moveTo(px, mainRect.y);
+    ctx.lineTo(px, mainRect.y + mainRect.h);
+    ctx.stroke();
   }
 }
 
@@ -896,6 +909,10 @@ async function tickMeasureMode(cropped, measureCropped, now, bandCropped = null)
   state.measureChangeStartedAt = 0;
 }
 
+const CURSOR_ARM_RATIO = 0.5;
+const CURSOR_LEFT_RATIO = 0.34;
+const CURSOR_JUMP_RATIO = 0.22;
+
 function resetCursorTrack(x = null) {
   state.lastPlayheadX = x;
   state.playheadPeakX = x;
@@ -904,7 +921,7 @@ function resetCursorTrack(x = null) {
 }
 
 function armCursorIfOnRight(x, scoreWidth) {
-  if (x != null && x > scoreWidth * 0.62) state.playheadArmed = true;
+  if (x != null && x > scoreWidth * CURSOR_ARM_RATIO) state.playheadArmed = true;
 }
 
 function beginAwaitNewPage(x) {
@@ -917,10 +934,26 @@ function beginAwaitNewPage(x) {
 
 function saveCursorPageTurn(cropped, now, x) {
   if (now - state.lastSavedAt < triggerMinIntervalMs()) return false;
-  if (!saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)")) return false;
+  const waited = now - state.cursorPendingAt;
+  const force = waited >= 160;
+  if (!saveCapture(cropped, 1, now, null, "저장됨 (재생 커서 · 페이지 전환)", force)) {
+    if (waited >= 450) {
+      state.cursorAwaitingNewPage = false;
+      resetCursorTrack(x);
+    }
+    return false;
+  }
   state.cursorAwaitingNewPage = false;
   resetCursorTrack(x);
   return true;
+}
+
+function cursorWrapped(scoreWidth, x, peak) {
+  if (x == null || peak == null) return false;
+  const jumpedLeft = peak - x > scoreWidth * CURSOR_JUMP_RATIO;
+  const fromRight = peak > scoreWidth * CURSOR_ARM_RATIO;
+  const toLeft = x < scoreWidth * CURSOR_LEFT_RATIO;
+  return fromRight && toLeft && jumpedLeft;
 }
 
 async function tickCursorMode(cropped, now) {
@@ -936,21 +969,24 @@ async function tickCursorMode(cropped, now) {
     resetCursorTrack(current.present ? current.x : null);
     state.cursorAwaitingNewPage = false;
     if (current.present) armCursorIfOnRight(current.x, scoreWidth);
-    setMessage("첫 프레임 저장");
+    setMessage(current.present ? "첫 프레임 저장 · 커서 감지됨" : "첫 프레임 저장 · 커서를 찾는 중");
+    renderUi();
     return;
   }
 
   if (state.cursorAwaitingNewPage) {
     const waited = now - state.cursorPendingAt;
-    if (waited < 140) return;
-    if (isNearlyIdenticalScore(cropped) && waited < 350) return;
+    if (waited < 120) return;
+    if (isNearlyIdenticalScore(cropped) && waited < 280) return;
     saveCursorPageTurn(cropped, now, current.present ? current.x : state.lastPlayheadX);
+    renderUi();
     return;
   }
 
   if (!current.present) {
-    if (state.playheadArmed && (state.playheadPeakX ?? 0) > scoreWidth * 0.62) {
+    if (state.playheadArmed && (state.playheadPeakX ?? 0) > scoreWidth * CURSOR_ARM_RATIO) {
       state.cursorPendingAt = state.cursorPendingAt || now;
+      if (now - state.cursorPendingAt >= 260) beginAwaitNewPage(state.lastPlayheadX);
     }
     return;
   }
@@ -960,9 +996,9 @@ async function tickCursorMode(cropped, now) {
   if (
     state.cursorPendingAt &&
     state.playheadArmed &&
-    x < scoreWidth * 0.22 &&
-    (state.playheadPeakX ?? 0) > scoreWidth * 0.62 &&
-    now - state.cursorPendingAt < 800
+    x < scoreWidth * CURSOR_LEFT_RATIO &&
+    (state.playheadPeakX ?? 0) > scoreWidth * CURSOR_ARM_RATIO &&
+    now - state.cursorPendingAt < 900
   ) {
     beginAwaitNewPage(x);
     return;
@@ -972,10 +1008,18 @@ async function tickCursorMode(cropped, now) {
   if (state.lastPlayheadX == null) {
     resetCursorTrack(x);
     armCursorIfOnRight(x, scoreWidth);
+    renderUi();
     return;
   }
 
-  if (x >= state.lastPlayheadX - Math.max(4, scoreWidth * 0.01)) {
+  const peak = state.playheadPeakX ?? state.lastPlayheadX;
+  if (cursorWrapped(scoreWidth, x, peak) || cursorWrapped(scoreWidth, x, state.lastPlayheadX)) {
+    state.lastPlayheadX = x;
+    beginAwaitNewPage(x);
+    return;
+  }
+
+  if (x >= state.lastPlayheadX - Math.max(6, scoreWidth * 0.015)) {
     state.playheadPeakX =
       state.playheadPeakX == null ? x : Math.max(state.playheadPeakX, x);
     armCursorIfOnRight(x, scoreWidth);
@@ -983,17 +1027,7 @@ async function tickCursorMode(cropped, now) {
     return;
   }
 
-  const peak = state.playheadPeakX ?? state.lastPlayheadX;
-  const wrapped =
-    state.playheadArmed &&
-    peak > scoreWidth * 0.62 &&
-    x < scoreWidth * 0.22 &&
-    peak - x > scoreWidth * 0.4;
-
   state.lastPlayheadX = x;
-  if (!wrapped) return;
-
-  beginAwaitNewPage(x);
 }
 
 async function tickDiffMode(cropped, now) {
@@ -1036,7 +1070,6 @@ async function tick() {
   state.capturing = true;
   try {
     pinOverlayToVideo();
-    drawOverlay();
     const cropped = grabCrop();
     if (!cropped) return;
 
@@ -1066,6 +1099,7 @@ async function tick() {
   } catch (error) {
     setMessage(error.message || String(error), true);
   } finally {
+    drawOverlay();
     state.capturing = false;
   }
 }

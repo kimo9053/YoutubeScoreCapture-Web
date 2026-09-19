@@ -16,6 +16,16 @@ function isRedHighlightLoose(r, g, b, a) {
   return r >= 130 && r > g + 12 && r > b + 12 && g <= 170 && b <= 170;
 }
 
+/** 유튜브 공식 악보의 현재 음 파란/청록 칸 */
+function isBlueHighlight(r, g, b, a) {
+  if (a < 40) return false;
+  return b >= 120 && b - Math.max(r, g) >= 16 && r <= 215 && g <= 235;
+}
+
+function isPlayheadPixel(r, g, b, a) {
+  return isRedHighlightLoose(r, g, b, a) || isBlueHighlight(r, g, b, a);
+}
+
 function grayOf(r, g, b) {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
@@ -163,13 +173,13 @@ export function detectPlayhead(imageData) {
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = (y * width + x) * 4;
-      if (!isRedHighlightLoose(data[i], data[i + 1], data[i + 2], data[i + 3])) continue;
+      if (!isPlayheadPixel(data[i], data[i + 1], data[i + 2], data[i + 3])) continue;
       cols[x] += 1;
       count += 1;
     }
   }
 
-  const minCount = Math.max(8, Math.round(height * 0.03));
+  const minCount = Math.max(6, Math.round(height * 0.012));
   if (count < minCount) {
     return { present: false, x: null, minX: null, maxX: null, width: 0, count };
   }
@@ -183,7 +193,7 @@ export function detectPlayhead(imageData) {
     }
   }
 
-  const band = Math.max(3, Math.round(width * 0.025));
+  const band = Math.max(4, Math.round(width * 0.03));
   let inBand = 0;
   let minX = width;
   let maxX = 0;
@@ -194,8 +204,13 @@ export function detectPlayhead(imageData) {
     maxX = Math.max(maxX, x);
   }
 
-  // 세로 선이 아니면(퍼진 빨간 UI) 커서로 보지 않음
-  if (inBand / count < 0.25 || peak < height * 0.025) {
+  const blobWidth = Math.max(1, maxX - minX + 1);
+  const compact = blobWidth <= Math.max(14, width * 0.08);
+  const tallEnough = peak >= Math.max(5, height * 0.012);
+  const clustered = count > 0 && inBand / count >= 0.16;
+
+  // 세로 재생선 또는 음표 위 작은 파란/빨간 칸
+  if (!tallEnough || (!compact && !clustered)) {
     return { present: false, x: null, minX: null, maxX: null, width: 0, count };
   }
 
@@ -204,7 +219,7 @@ export function detectPlayhead(imageData) {
     x: peakX,
     minX,
     maxX,
-    width: Math.max(1, maxX - minX + 1),
+    width: blobWidth,
     count
   };
 }
