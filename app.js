@@ -72,7 +72,7 @@ const state = {
   capturing: false,
   sensitivity: 0.08,
   minIntervalMs: 300,
-  pdfColumns: 2,
+  pdfColumns: 1,
   lastImageData: null,
   lastFingerprint: null,
   lastMeasureFingerprint: null,
@@ -88,6 +88,9 @@ const state = {
   lastSavedAt: 0,
   scoreSeen: false,
   scoreMissingSince: 0,
+  lastPresentScore: null,
+  lastPresentMeasure: null,
+  lastScoreFlushed: false,
   prevImageData: null,
   changeStartedAt: 0,
   captures: [],
@@ -130,7 +133,7 @@ function setMessage(text, isError = false) {
 
 function getPdfColumns() {
   const checked = document.querySelector('input[name="pdfColumns"]:checked');
-  return Number(checked?.value || state.pdfColumns || 2);
+  return Number(checked?.value || state.pdfColumns || 1);
 }
 
 function canManualCapture() {
@@ -682,12 +685,11 @@ function grabMeasureBand() {
 
 function ensureDataUrl(cropped) {
   if (cropped.dataUrl) return cropped;
-  // grabCrop 직후 cropCanvas에 동일 프레임이 남아 있음
   if (cropCanvas.width !== cropped.width || cropCanvas.height !== cropped.height) {
     cropCanvas.width = cropped.width;
     cropCanvas.height = cropped.height;
-    cropCtx.putImageData(cropped.imageData, 0, 0);
   }
+  cropCtx.putImageData(cropped.imageData, 0, 0);
   return {
     ...cropped,
     dataUrl: cropCanvas.toDataURL("image/png")
@@ -745,15 +747,42 @@ function manualCapture(insertIndex = null) {
   setMessage(`수동 캡처를 ${pos}번 위치에 넣었습니다.`);
 }
 
+function rememberPresentScore(cropped, measureCropped = null) {
+  state.lastPresentScore = cropped;
+  if (measureCropped) state.lastPresentMeasure = measureCropped;
+}
+
+function lastMeasureStillUnsaved() {
+  if (!state.lastPresentMeasure || !state.lastMeasureImageData) {
+    return Boolean(state.measureChangeStartedAt);
+  }
+  return regionPixelsChanged(
+    state.lastMeasureImageData,
+    state.lastPresentMeasure,
+    MEASURE_INK_RATIO,
+    MEASURE_PIXEL_RATIO
+  );
+}
+
+function flushLastScore(now) {
+  const cropped = state.lastPresentScore;
+  if (!cropped || state.lastScoreFlushed) return;
+  state.lastScoreFlushed = true;
+  if (!lastMeasureStillUnsaved() && isNearlyIdenticalScore(cropped)) return;
+  saveCapture(cropped, 1, now, state.lastPresentMeasure, "저장됨 (마지막 악보)", true);
+}
+
 function shouldStopBecauseScoreGone(cropped, now) {
   const presence = analyzeScorePresence(cropped.imageData);
   if (presence.present) {
     state.scoreSeen = true;
     state.scoreMissingSince = 0;
+    rememberPresentScore(cropped);
     return false;
   }
 
   if (!state.scoreSeen) return false;
+  flushLastScore(now);
   if (!state.scoreMissingSince) state.scoreMissingSince = now;
   return now - state.scoreMissingSince >= SCORE_GONE_MS;
 }
@@ -771,9 +800,9 @@ function isNearlyIdenticalScore(cropped) {
   return changeRatio < 0.006;
 }
 
-function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = null) {
+function saveCapture(cropped, changeRatio, now, measureCropped = null, reason = null, force = false) {
   const fp = fingerprint(cropped.imageData);
-  if (state.lastImageData && isNearlyIdenticalScore(cropped)) {
+  if (!force && state.lastImageData && isNearlyIdenticalScore(cropped)) {
     state.changeStartedAt = 0;
     return false;
   }
@@ -1023,6 +1052,7 @@ async function tick() {
       const measureCropped = grabMeasureCrop();
       const bandCropped = grabMeasureBand();
       if (!measureCropped && !bandCropped) return;
+      rememberPresentScore(cropped, measureCropped);
       await tickMeasureMode(cropped, measureCropped, now, bandCropped);
       return;
     }
@@ -1062,6 +1092,9 @@ function startCapture() {
   state.lastSavedAt = 0;
   state.scoreSeen = false;
   state.scoreMissingSince = 0;
+  state.lastPresentScore = null;
+  state.lastPresentMeasure = null;
+  state.lastScoreFlushed = false;
   state.changeStartedAt = 0;
   state.timerId = setInterval(tick, 50);
   tick();
@@ -1129,6 +1162,9 @@ function clearCaptures() {
   state.cursorAwaitingNewPage = false;
   state.scoreSeen = false;
   state.scoreMissingSince = 0;
+  state.lastPresentScore = null;
+  state.lastPresentMeasure = null;
+  state.lastScoreFlushed = false;
   state.prevImageData = null;
   state.changeStartedAt = 0;
   renderThumbs();

@@ -31,7 +31,7 @@ function escapePdfText(text) {
 }
 
 export async function buildPdf(images, options = {}) {
-  const columns = options.columns ?? 2;
+  const columns = options.columns ?? 1;
   const margin = options.margin ?? 36;
   const gap = options.gap ?? 16;
   const pageWidth = 595.28;
