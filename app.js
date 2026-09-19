@@ -63,7 +63,6 @@ const state = {
   selectingMeasure: false,
   region: null,
   measureRegion: null,
-  measureOffset: null,
   regionVideoSize: null,
   measureModeEnabled: false,
   cursorModeEnabled: false,
@@ -315,27 +314,27 @@ function currentVideoSize() {
   return w && h ? { w, h } : null;
 }
 
-function getOverlayBox() {
-  return els.overlay.getBoundingClientRect();
-}
-
 function getVideoLayout() {
   const video = els.preview;
-  const box = getOverlayBox();
+  const overlay = els.overlay.getBoundingClientRect();
+  const vbox = video.getBoundingClientRect();
   const vw = video.videoWidth;
   const vh = video.videoHeight;
-  if (!vw || !vh || !box.width || !box.height) return null;
+  if (!vw || !vh || !vbox.width || !vbox.height) return null;
 
-  const scale = Math.min(box.width / vw, box.height / vh);
+  const scale = Math.min(vbox.width / vw, vbox.height / vh);
   const dispW = vw * scale;
   const dispH = vh * scale;
+  const contentLeft = vbox.left + (vbox.width - dispW) / 2;
+  const contentTop = vbox.top + (vbox.height - dispH) / 2;
   return {
-    wrap: box,
     vw,
     vh,
     scale,
-    offX: (box.width - dispW) / 2,
-    offY: (box.height - dispH) / 2,
+    contentLeft,
+    contentTop,
+    originX: contentLeft - overlay.left,
+    originY: contentTop - overlay.top,
     dpr: window.devicePixelRatio || 1
   };
 }
@@ -343,7 +342,7 @@ function getVideoLayout() {
 function syncOverlaySize() {
   els.overlay.style.width = "100%";
   els.overlay.style.height = "100%";
-  const rect = getOverlayBox();
+  const rect = els.overlay.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(rect.width * dpr));
   const h = Math.max(1, Math.round(rect.height * dpr));
@@ -355,8 +354,8 @@ function syncOverlaySize() {
 function cssToVideoPoint(clientX, clientY) {
   const layout = getVideoLayout();
   if (!layout) return null;
-  const x = (clientX - layout.wrap.left - layout.offX) / layout.scale;
-  const y = (clientY - layout.wrap.top - layout.offY) / layout.scale;
+  const x = (clientX - layout.contentLeft) / layout.scale;
+  const y = (clientY - layout.contentTop) / layout.scale;
   return {
     x: Math.max(0, Math.min(layout.vw, x)),
     y: Math.max(0, Math.min(layout.vh, y))
@@ -367,37 +366,11 @@ function videoRectToOverlay(region) {
   const layout = getVideoLayout();
   if (!layout || !region) return null;
   return {
-    x: (layout.offX + region.x * layout.scale) * layout.dpr,
-    y: (layout.offY + region.y * layout.scale) * layout.dpr,
+    x: (layout.originX + region.x * layout.scale) * layout.dpr,
+    y: (layout.originY + region.y * layout.scale) * layout.dpr,
     w: region.w * layout.scale * layout.dpr,
     h: region.h * layout.scale * layout.dpr
   };
-}
-
-function getMeasureRegion() {
-  if (state.measureOffset && state.region) {
-    return {
-      x: state.region.x + state.measureOffset.x,
-      y: state.region.y + state.measureOffset.y,
-      w: state.measureOffset.w,
-      h: state.measureOffset.h
-    };
-  }
-  return state.measureRegion;
-}
-
-function setMeasureRegion(abs) {
-  state.measureRegion = abs;
-  if (abs && state.region) {
-    state.measureOffset = {
-      x: abs.x - state.region.x,
-      y: abs.y - state.region.y,
-      w: abs.w,
-      h: abs.h
-    };
-  } else {
-    state.measureOffset = null;
-  }
 }
 
 function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
@@ -405,7 +378,7 @@ function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
 
   const mainRegion = tempRegion || state.region;
-  const measureRegion = tempMeasureRegion ?? (tempRegion ? null : getMeasureRegion());
+  const measureRegion = tempMeasureRegion ?? (tempRegion ? null : state.measureRegion);
   const mainRect = videoRectToOverlay(mainRegion);
   if (!mainRect) return;
 
@@ -422,16 +395,6 @@ function drawOverlay(tempRegion = null, tempMeasureRegion = null) {
   if (measureRect) {
     ctx.strokeStyle = "#42a5f5";
     ctx.strokeRect(measureRect.x, measureRect.y, measureRect.w, measureRect.h);
-  }
-
-  const bandRect = !tempRegion && state.measureModeEnabled ? videoRectToOverlay(scoreMeasureBand()) : null;
-  if (bandRect) {
-    ctx.save();
-    ctx.setLineDash([5, 4]);
-    ctx.strokeStyle = "rgba(66, 165, 245, 0.7)";
-    ctx.lineWidth = Math.max(1, lineWidth - 1);
-    ctx.strokeRect(bandRect.x, bandRect.y, bandRect.w, Math.min(bandRect.h, lineWidth * 14));
-    ctx.restore();
   }
 }
 
@@ -488,7 +451,6 @@ async function startShare() {
     state.stream = stream;
     state.region = null;
     state.measureRegion = null;
-    state.measureOffset = null;
     state.regionVideoSize = null;
     state.measureModeEnabled = false;
     state.cursorModeEnabled = false;
@@ -501,7 +463,6 @@ async function startShare() {
       els.preview.srcObject = null;
       state.region = null;
       state.measureRegion = null;
-      state.measureOffset = null;
       state.regionVideoSize = null;
       state.measureModeEnabled = false;
       state.cursorModeEnabled = false;
@@ -580,13 +541,12 @@ function beginRegionSelect(mode = "main") {
     }
     state.regionVideoSize = currentVideoSize();
     if (mode === "measure") {
-      setMeasureRegion(current);
+      state.measureRegion = current;
       cleanup();
       setMessage(`마디 숫자 영역 지정됨 (${current.w}×${current.h}). '마디 숫자 우선 캡처'를 켜세요.`);
     } else {
       state.region = current;
       state.measureRegion = null;
-      state.measureOffset = null;
       state.measureModeEnabled = false;
       state.cursorModeEnabled = false;
       cleanup();
@@ -666,9 +626,9 @@ function scoreMeasureBand() {
 }
 
 function grabMeasureCrop() {
-  const source = getMeasureRegion();
+  const source = state.measureRegion;
   const padded = source
-    ? expandRegion(source, { top: 22, left: 30, right: 12, bottom: 8 })
+    ? expandRegion(source, { top: 10, left: 14, right: 6, bottom: 4 })
     : null;
   return grabCropFromRegion(padded || scoreMeasureBand(), measureCropCanvas, measureCropCtx);
 }
