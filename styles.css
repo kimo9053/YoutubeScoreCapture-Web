@@ -402,6 +402,180 @@ input[type="number"] {
   place-items: center;
 }
 
+a.link,
+a.link:visited {
+  color: #90caf9;
+  text-decoration: none;
+  font-size: 12px;
+}
+
+a.link:hover {
+  text-decoration: underline;
+}
+
+a.nav-button {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  background: #1f2430;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-weight: 600;
+}
+
+a.nav-button:hover {
+  border-color: #445;
+  background: #262c3a;
+}
+
+input.file {
+  width: 100%;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+}
+
+.segmented.three {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.checks {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.checks label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checks input {
+  accent-color: var(--accent);
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.tag.ok { background: #2e7d32; }
+.tag.check { background: #f57c00; }
+.tag.octave { background: #1565c0; }
+.tag.ignored { background: #757575; }
+.tag.chord { background: #8e24aa; }
+
+.stage.transpose-stage {
+  display: block;
+  overflow: auto;
+}
+
+.strips {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.strip {
+  position: relative;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.strip-no {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  font-size: 11px;
+  color: #999;
+}
+
+.strip-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.strip-canvas.editable {
+  cursor: pointer;
+}
+
+.tuning-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+button.mini {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+}
+
+.tune-dialog {
+  max-width: 420px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 20px;
+}
+
+.tune-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.tune-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.tune-dialog p {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.tune-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.tune-options button {
+  padding: 10px 6px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.tune-options button small {
+  display: block;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tune-no {
+  width: 100%;
+}
+
+.empty-note {
+  color: var(--muted);
+  text-align: center;
+  padding: 48px 16px;
+}
+
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;
