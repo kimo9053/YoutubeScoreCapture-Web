@@ -469,7 +469,7 @@ export function sourceOpenPitches(lineCount) {
 
 /**
  * Move a fret by `shift` semitones, keeping the same string when possible,
- * otherwise the nearest string that can play it, otherwise an octave fallback.
+ * otherwise the nearest string that can play it; null when no string can.
  */
 export function transposeFret(line, fret, shift, srcOpen, dstOpen) {
   const pitch = srcOpen[line] + fret + shift;
@@ -490,13 +490,8 @@ export function transposeFret(line, fret, shift, srcOpen, dstOpen) {
     }
     return order.find((i) => fits(p, i)) ?? -1;
   };
-  let target = search(pitch);
-  if (target >= 0) return { line: target, fret: pitch - dstOpen[target], octave: 0 };
-  for (const oct of [12, -12, 24, -24]) {
-    target = search(pitch + oct);
-    if (target >= 0) return { line: target, fret: pitch + oct - dstOpen[target], octave: oct };
-  }
-  return null;
+  const target = search(pitch);
+  return target >= 0 ? { line: target, fret: pitch - dstOpen[target] } : null;
 }
 
 const SHARP_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];

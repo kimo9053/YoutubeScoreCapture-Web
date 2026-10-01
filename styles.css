@@ -469,7 +469,7 @@ input.file {
 
 .tag.ok { background: #2e7d32; }
 .tag.check { background: #f57c00; }
-.tag.octave { background: #1565c0; }
+.tag.unplaced { background: #d32f2f; }
 .tag.ignored { background: #757575; }
 .tag.chord { background: #8e24aa; }
 

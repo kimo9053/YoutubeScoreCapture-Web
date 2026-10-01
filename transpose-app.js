@@ -34,7 +34,7 @@ const els = {
   sumStrips: $("sumStrips"),
   sumNotes: $("sumNotes"),
   sumCheck: $("sumCheck"),
-  sumOctave: $("sumOctave"),
+  sumUnplaced: $("sumUnplaced"),
   sumIgnored: $("sumIgnored"),
   sumChords: $("sumChords"),
   sumLowB: $("sumLowB"),
@@ -49,15 +49,13 @@ const els = {
 
 /** Furthest the lowest string is offered to be tuned down, in semitones. */
 const MAX_DROP = 2;
-/** Tuning is suggested only for key shifts down to this value; lower keys get KEY_WARNING. */
-const MIN_TUNING_KEY = -2;
-const KEY_WARNING = "-3키 이상 낮출 경우 연주가 불안해질 수 있습니다. 조정 키 값을 줄여주세요.";
+const TUNE_WARNING = "튜닝을 하더라도 옥타브를 이동해야합니다. 조정 키 값을 줄여주세요.";
+const NO_TUNE_WARNING = "튜닝하지 않으면 표시할 수 없는 음이 있습니다. 조정 키 값을 줄여주세요.";
 const TUNE_ASK_DELAY = 700;
 
 const COLORS = {
   ok: "#2e7d32",
   check: "#f57c00",
-  octave: "#1565c0",
   ignored: "#9e9e9e",
   chord: "#8e24aa"
 };
@@ -69,10 +67,11 @@ const state = {
   busy: false,
   needLowB: false,
   useFlats: false,
-  /** null = nothing out of range; otherwise { key, need, choice: undefined (not asked) | null (no) | pitch } */
+  /** null = no tuning can help; otherwise { key, need, options, choice: undefined (not asked) | null (no) | pitch } */
   tuning: null,
-  /** set when notes fall off the instrument at a key below MIN_TUNING_KEY: { key, shown } */
+  /** set when some notes have no string even with the allowed tunings: { key, shown } */
   keyWarning: null,
+  unplaced: 0,
   askTimer: 0
 };
 
@@ -240,10 +239,33 @@ function findTuningNeed(k, allowLowB) {
   return need;
 }
 
-function tuningOptions(need) {
+function targetOpen(lineCount, allowLowB, tuned) {
+  const open = [...targetOpenPitches(lineCount, allowLowB)];
+  if (tuned !== null && tuned < open[open.length - 1]) open[open.length - 1] = tuned;
+  return open;
+}
+
+/** Notes that no string can play after shifting by k, with the lowest string tuned to `tuned` (null = standard). */
+function countUnplaced(k, allowLowB, tuned) {
+  if (k === 0) return 0;
+  let count = 0;
+  for (const s of state.strips) {
+    if (!s.analysis) continue;
+    const lineCount = s.analysis.tab.ys.length;
+    const srcOpen = sourceOpenPitches(lineCount);
+    const dstOpen = targetOpen(lineCount, allowLowB, tuned);
+    for (const n of s.notes) {
+      if (playable(n) && !transposeFret(n.line, n.value, k, srcOpen, dstOpen)) count += 1;
+    }
+  }
+  return count;
+}
+
+/** Tunings of the lowest string (at most MAX_DROP down) that leave no note unplaced. */
+function tuningOptions(need, k, allowLowB) {
   const out = [];
   for (let t = need.minPitch; t >= need.minPitch - 2; t -= 1) {
-    if (need.lowest - t <= MAX_DROP) out.push(t);
+    if (need.lowest - t <= MAX_DROP && !countUnplaced(k, allowLowB, t)) out.push(t);
   }
   return out;
 }
@@ -255,28 +277,29 @@ function tunedPitch() {
 
 function tuningSummary() {
   const t = state.tuning;
-  if (!t) return state.keyWarning ? "표준 (옥타브 이동)" : "표준";
+  if (!t) return state.keyWarning ? "표준 (표시 못 하는 음 있음)" : "표준";
   if (t.choice === undefined) return "선택 필요";
-  if (t.choice === null) return "표준 (옥타브 이동)";
+  if (t.choice === null) return "표준 (표시 못 하는 음 있음)";
   return `${t.need.strings}번 줄 ${noteName(t.need.lowest, state.useFlats)}→${noteName(t.choice, state.useFlats)}`;
 }
 
 function updateTuningState(k, allowLowB) {
-  const need = findTuningNeed(k, allowLowB);
-  if (need && k < MIN_TUNING_KEY) {
+  const blocked = countUnplaced(k, allowLowB, null);
+  const need = blocked ? findTuningNeed(k, allowLowB) : null;
+  const options = need ? tuningOptions(need, k, allowLowB) : [];
+  if (blocked && !options.length) {
     const key = `${k}:${allowLowB}`;
     if (state.keyWarning?.key !== key) state.keyWarning = { key, shown: false };
   } else {
-    if (state.keyWarning && els.message.textContent === KEY_WARNING) setMessage("");
     state.keyWarning = null;
   }
-  if (!need || k < MIN_TUNING_KEY || !tuningOptions(need).length) {
+  if (!options.length) {
     state.tuning = null;
     return;
   }
   const key = `${need.lowest}:${need.minPitch}`;
-  if (state.tuning?.key === key) state.tuning.need = need;
-  else state.tuning = { key, need, choice: undefined };
+  if (state.tuning?.key === key) Object.assign(state.tuning, { need, options });
+  else state.tuning = { key, need, options, choice: undefined };
 }
 
 function scheduleTuningAsk() {
@@ -284,22 +307,24 @@ function scheduleTuningAsk() {
   if (state.tuning && state.tuning.choice === undefined) {
     state.askTimer = setTimeout(() => openTuningDialog(false), TUNE_ASK_DELAY);
   } else if (state.keyWarning && !state.keyWarning.shown) {
-    state.askTimer = setTimeout(showKeyWarning, TUNE_ASK_DELAY);
+    state.askTimer = setTimeout(() => {
+      if (!state.keyWarning || state.keyWarning.shown || state.busy) return;
+      if (showWarning(TUNE_WARNING)) state.keyWarning.shown = true;
+    }, TUNE_ASK_DELAY);
   }
 }
 
-function showKeyWarning() {
-  const warning = state.keyWarning;
+function showWarning(text) {
   const dlg = els.tuneDialog;
-  if (!warning || warning.shown || dlg.open || state.busy) return;
-  warning.shown = true;
-  setMessage(KEY_WARNING, true);
+  setMessage(text, true);
+  if (dlg.open) return false;
   els.tuneTitle.textContent = "알림";
-  els.tuneText.textContent = KEY_WARNING;
+  els.tuneText.textContent = text;
   els.tuneOptions.replaceChildren();
   els.tuneNo.textContent = "확인";
   dlg.returnValue = "";
   dlg.showModal();
+  return true;
 }
 
 /** Ask which tuning to use; resolves after the user picks (or immediately when nothing to ask). */
@@ -307,13 +332,12 @@ function openTuningDialog(force) {
   const t = state.tuning;
   const dlg = els.tuneDialog;
   if (!t || dlg.open || (!force && (t.choice !== undefined || state.busy))) return Promise.resolve();
-  const { need } = t;
-  const options = tuningOptions(need);
+  const { need, options } = t;
   const low = `${need.strings}번 줄(${noteName(need.lowest, state.useFlats)})`;
   const names = options.map((p) => noteNameBoth(p)).join(", ");
   const ask = options.length > 1 ? `${low}을 ${names} 중 선택하세요.` : `${low}을 ${names}(으)로 내려서 표시합니다.`;
   els.tuneTitle.textContent = "튜닝 제안";
-  els.tuneNo.textContent = "아니오 (옥타브를 옮겨서 표시)";
+  els.tuneNo.textContent = "아니오 (튜닝하지 않음)";
   els.tuneText.textContent =
     `악보에 표시하지 못하는 음이 있습니다 (${need.count}개, 가장 낮은 음 ${noteNameBoth(need.minPitch)}). ` +
     `튜닝을 하시겠습니까? ${ask}`;
@@ -334,6 +358,7 @@ function openTuningDialog(force) {
         const v = dlg.returnValue;
         if (state.tuning === t) t.choice = v && v !== "no" ? Number(v) : null;
         recompute();
+        if (state.tuning === t && t.choice === null && state.unplaced) setMessage(NO_TUNE_WARNING, true);
         resolve();
       },
       { once: true }
@@ -348,7 +373,7 @@ function recompute() {
   let needLowB = false;
   let notes = 0;
   let check = 0;
-  let octave = 0;
+  let unplaced = 0;
   let ignored = 0;
   let chordCount = 0;
 
@@ -359,25 +384,22 @@ function recompute() {
     if (!s.analysis) continue;
     const lineCount = s.analysis.tab.ys.length;
     const srcOpen = sourceOpenPitches(lineCount);
-    const dstOpen = [...targetOpenPitches(lineCount, allowLowB)];
-    if (tuned !== null && tuned < dstOpen[dstOpen.length - 1]) dstOpen[dstOpen.length - 1] = tuned;
+    const dstOpen = targetOpen(lineCount, allowLowB, tuned);
     for (const n of s.notes) {
       n.target = null;
-      n.octave = 0;
       n.unplayable = false;
       if (k !== 0 && playable(n)) {
         const t = transposeFret(n.line, n.value, k, srcOpen, dstOpen);
         if (t) {
           n.target = t;
-          n.octave = t.octave;
           if (lineCount < 5 && t.line >= lineCount) needLowB = true;
         } else {
           n.unplayable = true;
+          unplaced += 1;
         }
       }
       notes += 1;
       if (n.status === "check" || n.unplayable) check += 1;
-      if (n.octave) octave += 1;
     }
     ignored += s.ignored.length;
     chordCount += s.chords.filter((c) => !c.ignored).length;
@@ -399,10 +421,12 @@ function recompute() {
   }
 
   state.needLowB = needLowB;
+  state.unplaced = unplaced;
+  if (!unplaced && [TUNE_WARNING, NO_TUNE_WARNING].includes(els.message.textContent)) setMessage("");
   els.sumStrips.textContent = String(state.strips.length);
   els.sumNotes.textContent = String(notes);
   els.sumCheck.textContent = String(check);
-  els.sumOctave.textContent = String(octave);
+  els.sumUnplaced.textContent = String(unplaced);
   els.sumIgnored.textContent = String(ignored);
   els.sumChords.textContent = String(chordCount);
   els.sumLowB.textContent = needLowB ? "예" : "아니오";
@@ -451,7 +475,6 @@ function tagLabel(ctx, x, y, text, color) {
 
 function noteColor(n) {
   if (n.status === "check" || n.unplayable) return COLORS.check;
-  if (n.octave) return COLORS.octave;
   return COLORS.ok;
 }
 
@@ -621,6 +644,10 @@ function onStripClick(s, canvas, ev) {
 async function savePdf() {
   if (!state.analyzed) return;
   if (state.tuning && state.tuning.choice === undefined) await openTuningDialog(true);
+  if (state.unplaced) {
+    showWarning(state.keyWarning ? TUNE_WARNING : NO_TUNE_WARNING);
+    return;
+  }
   state.busy = true;
   renderUi();
   try {
