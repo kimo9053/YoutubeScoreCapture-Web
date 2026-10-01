@@ -41,12 +41,17 @@ const els = {
   sumTuning: $("sumTuning"),
   btnTuning: $("btnTuning"),
   tuneDialog: $("tuneDialog"),
+  tuneTitle: $("tuneTitle"),
   tuneText: $("tuneText"),
-  tuneOptions: $("tuneOptions")
+  tuneOptions: $("tuneOptions"),
+  tuneNo: $("tuneNo")
 };
 
 /** Furthest the lowest string is offered to be tuned down, in semitones. */
 const MAX_DROP = 2;
+/** Tuning is suggested only for key shifts down to this value; lower keys get KEY_WARNING. */
+const MIN_TUNING_KEY = -2;
+const KEY_WARNING = "-3키 이상 낮출 경우 연주가 불안해질 수 있습니다. 조정 키 값을 줄여주세요.";
 const TUNE_ASK_DELAY = 700;
 
 const COLORS = {
@@ -66,6 +71,8 @@ const state = {
   useFlats: false,
   /** null = nothing out of range; otherwise { key, need, choice: undefined (not asked) | null (no) | pitch } */
   tuning: null,
+  /** set when notes fall off the instrument at a key below MIN_TUNING_KEY: { key, shown } */
+  keyWarning: null,
   askTimer: 0
 };
 
@@ -248,7 +255,7 @@ function tunedPitch() {
 
 function tuningSummary() {
   const t = state.tuning;
-  if (!t) return "표준";
+  if (!t) return state.keyWarning ? "표준 (옥타브 이동)" : "표준";
   if (t.choice === undefined) return "선택 필요";
   if (t.choice === null) return "표준 (옥타브 이동)";
   return `${t.need.strings}번 줄 ${noteName(t.need.lowest, state.useFlats)}→${noteName(t.choice, state.useFlats)}`;
@@ -256,7 +263,14 @@ function tuningSummary() {
 
 function updateTuningState(k, allowLowB) {
   const need = findTuningNeed(k, allowLowB);
-  if (!need || !tuningOptions(need).length) {
+  if (need && k < MIN_TUNING_KEY) {
+    const key = `${k}:${allowLowB}`;
+    if (state.keyWarning?.key !== key) state.keyWarning = { key, shown: false };
+  } else {
+    if (state.keyWarning && els.message.textContent === KEY_WARNING) setMessage("");
+    state.keyWarning = null;
+  }
+  if (!need || k < MIN_TUNING_KEY || !tuningOptions(need).length) {
     state.tuning = null;
     return;
   }
@@ -269,7 +283,23 @@ function scheduleTuningAsk() {
   clearTimeout(state.askTimer);
   if (state.tuning && state.tuning.choice === undefined) {
     state.askTimer = setTimeout(() => openTuningDialog(false), TUNE_ASK_DELAY);
+  } else if (state.keyWarning && !state.keyWarning.shown) {
+    state.askTimer = setTimeout(showKeyWarning, TUNE_ASK_DELAY);
   }
+}
+
+function showKeyWarning() {
+  const warning = state.keyWarning;
+  const dlg = els.tuneDialog;
+  if (!warning || warning.shown || dlg.open || state.busy) return;
+  warning.shown = true;
+  setMessage(KEY_WARNING, true);
+  els.tuneTitle.textContent = "알림";
+  els.tuneText.textContent = KEY_WARNING;
+  els.tuneOptions.replaceChildren();
+  els.tuneNo.textContent = "확인";
+  dlg.returnValue = "";
+  dlg.showModal();
 }
 
 /** Ask which tuning to use; resolves after the user picks (or immediately when nothing to ask). */
@@ -282,6 +312,8 @@ function openTuningDialog(force) {
   const low = `${need.strings}번 줄(${noteName(need.lowest, state.useFlats)})`;
   const names = options.map((p) => noteNameBoth(p)).join(", ");
   const ask = options.length > 1 ? `${low}을 ${names} 중 선택하세요.` : `${low}을 ${names}(으)로 내려서 표시합니다.`;
+  els.tuneTitle.textContent = "튜닝 제안";
+  els.tuneNo.textContent = "아니오 (옥타브를 옮겨서 표시)";
   els.tuneText.textContent =
     `악보에 표시하지 못하는 음이 있습니다 (${need.count}개, 가장 낮은 음 ${noteNameBoth(need.minPitch)}). ` +
     `튜닝을 하시겠습니까? ${ask}`;
